@@ -3,8 +3,7 @@ import json
 import io
 import unicodedata
 from datetime import datetime, timedelta
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Bodyfrom fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Text, or_
 from sqlalchemy.ext.declarative import declarative_base
@@ -256,7 +255,7 @@ def suggest_cedulas(search_term: str = Form(...), db: Session = Depends(get_db))
     return suggestions
 
 @app.post("/export-excel")
-async def export_excel(registros: list):
+async def export_excel(registros: list = Body(...)):
     procesados = []
     for r in registros:
         fila = {}
