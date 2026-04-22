@@ -123,7 +123,7 @@ def save_state(payload: dict, db: Session = Depends(get_db)):
 @app.post("/upload-masters")
 async def upload_masters(file: UploadFile = File(...), source: str = Form(...), db: Session = Depends(get_db)):
     contents = await file.read()
-    df = pd.read_excel(io.BytesIO(contents))
+    df = pd.read_excel(io.BytesIO(contents), dtype=str)
     df = df.fillna("")
     df.columns = [str(c).strip().upper() for c in df.columns]
 
@@ -152,9 +152,17 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
     for index, row in df.iterrows():
         if not col_cedula:
             continue
+            
         cedula = str(row[col_cedula]).strip()
+        
+        if cedula.endswith('.0'):
+            cedula = cedula[:-2]
+            
         if not cedula or cedula.lower() == "nan":
             continue
+            
+        if cedula.isdigit() and len(cedula) < 10:
+            cedula = cedula.zfill(10)
             
         colaborador = db.query(Colaborador).filter(Colaborador.cedula == cedula).first()
         if not colaborador:
