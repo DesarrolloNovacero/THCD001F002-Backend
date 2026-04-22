@@ -4,23 +4,20 @@ import io
 import unicodedata
 from datetime import datetime, timedelta
 from typing import Optional
-
+from pydantic import BaseModel
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-
 from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Text, Numeric, ForeignKey, or_
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 import sqlalchemy
-
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import pandas as pd
 
-# --- CONFIGURACIÓN DE BASE DE DATOS ---
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./trainform.db")
 
 if DATABASE_URL.startswith("sqlite"):
@@ -31,15 +28,13 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# --- CONFIGURACIÓN DE SEGURIDAD ---
 SECRET_KEY = os.getenv("SECRET_KEY", "CLAVE_ULTRA_SECRETA_TRAINFORM")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 480 # 8 horas
+ACCESS_TOKEN_EXPIRE_MINUTES = 480 
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# --- MODELOS DE BASE DE DATOS (Adaptados a PostgreSQL/Neon) ---
 class Usuario(Base):
     __tablename__ = "usuarios"
     id = Column(UUID(as_uuid=True), primary_key=True, server_default=sqlalchemy.text("gen_random_uuid()"))
@@ -103,6 +98,12 @@ class Asistencia(Base):
     estado_validacion = Column(String(50), nullable=False)
     fecha_registro = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
 
+class NuevoUsuario(BaseModel):
+    email: str
+    password: str
+    nombre_completo: str
+    rol: str
+
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -115,7 +116,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- UTILIDADES ---
 def get_db():
     db = SessionLocal()
     try:
@@ -139,7 +139,6 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-# --- DEPENDENCIAS DE SEGURIDAD ---
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
@@ -163,8 +162,6 @@ def get_current_admin(current_user: Usuario = Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="No tienes permisos de administrador")
     return current_user
 
-# --- RUTAS DE LA API ---
-
 @app.post("/token")
 def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(Usuario).filter(Usuario.email == form_data.username).first()
@@ -182,6 +179,25 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
         "user_role": user.rol
     }
 
+@app.post("/crear-usuario")
+def crear_usuario(data: NuevoUsuario, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
+    usuario_existente = db.query(Usuario).filter(Usuario.email == data.email).first()
+    if usuario_existente:
+        raise HTTPException(status_code=400, detail="Este correo ya está registrado")
+        
+    hash_generado = pwd_context.hash(data.password)
+    
+    nuevo_usuario = Usuario(
+        email=data.email,
+        password_hash=hash_generado,
+        nombre_completo=data.nombre_completo,
+        rol=data.rol
+    )
+    db.add(nuevo_usuario)
+    db.commit()
+    
+    return {"message": f"Usuario {data.nombre_completo} creado exitosamente"}
+
 @app.get("/")
 def read_root():
     return {"status": "API en linea, Segura y Conectada a Neon"}
@@ -193,7 +209,6 @@ def check_db_status(db: Session = Depends(get_db)):
 
 @app.get("/load-state")
 def load_state(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    # Carga el borrador especifico del usuario que inició sesión
     sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
     if sesion and sesion.estado_borrador_json:
         return json.loads(sesion.estado_borrador_json)
@@ -205,7 +220,7 @@ def save_state(payload: dict = Body(...), current_user: Usuario = Depends(get_cu
     if not sesion:
         sesion = SesionWeb(
             usuario_id=current_user.id,
-            token_sesion=f"draft_{current_user.id}", # ID unico de borrador por usuario
+            token_sesion=f"draft_{current_user.id}",
             estado_borrador_json=json.dumps(payload),
             expira_en=datetime.utcnow() + timedelta(days=7)
         )
@@ -216,7 +231,6 @@ def save_state(payload: dict = Body(...), current_user: Usuario = Depends(get_cu
     db.commit()
     return {"status": "ok"}
 
-# OJO: Esta ruta ahora requiere get_current_admin. Un usuario normal recibirá error 403.
 @app.post("/upload-masters")
 async def upload_masters(file: UploadFile = File(...), source: str = Form(...), current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
     contents = await file.read()
@@ -324,17 +338,14 @@ def suggest_cedulas(search_term: str = Form(...), current_user: Usuario = Depend
     suggestions = [{"cedula": r.cedula, "nombre": f"{r.apellidos} {r.nombres}".strip(), "source": r.origen} for r in resultados]
     return suggestions
 
-# --- NUEVA LOGICA DE EXPORTACIÓN Y TRAZABILIDAD ---
 @app.post("/export-excel")
 async def export_excel(payload: dict = Body(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    # El frontend ahora enviará un objeto con "eventData" y "registros"
     event_data = payload.get("eventData", {})
     registros = payload.get("registros", [])
     
     if not registros:
         raise HTTPException(status_code=400, detail="No hay registros para exportar")
 
-    # 1. Crear el Evento para la trazabilidad
     try:
         horas = float(event_data.get("totalHoras", 0)) if event_data.get("totalHoras") else 0.0
     except ValueError:
@@ -354,12 +365,10 @@ async def export_excel(payload: dict = Body(...), current_user: Usuario = Depend
         mes_anio=event_data.get("mesAnio")
     )
     db.add(nuevo_evento)
-    db.flush() # Obtiene el ID del evento antes de hacer commit
+    db.flush() 
     
-    # 2. Registrar las Asistencias
     procesados = []
     for r in registros:
-        # Trazabilidad en BD
         cedula_colaborador = str(r.get("CÉDULA", "")).strip()
         if cedula_colaborador:
             nueva_asistencia = Asistencia(
@@ -369,16 +378,13 @@ async def export_excel(payload: dict = Body(...), current_user: Usuario = Depend
             )
             db.add(nueva_asistencia)
             
-        # Preparación para Excel
         fila = {}
         for key, value in r.items():
             fila[key] = remove_accents(value)
         procesados.append(fila)
 
-    # Confirmar todo en la base de datos
     db.commit()
 
-    # 3. Generar el Excel
     df = pd.DataFrame(procesados)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
