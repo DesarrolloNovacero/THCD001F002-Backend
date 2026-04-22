@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Text
+from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Text, or_
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from jose import JWTError, jwt
@@ -179,7 +179,7 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
         
     db.commit()
     return {"message": "Datos procesados correctamente"}
-# verga para emelec
+
 @app.post("/validate-cedula")
 def validate_cedula(cedulas_json: str = Form(...), db: Session = Depends(get_db)):
     cedulas = json.loads(cedulas_json)
@@ -220,6 +220,32 @@ def validate_cedula(cedulas_json: str = Form(...), db: Session = Depends(get_db)
             })
             
     return resultados
+
+@app.post("/suggest-cedulas")
+def suggest_cedulas(search_term: str = Form(...), db: Session = Depends(get_db)):
+    search_term = search_term.strip()
+    if len(search_term) < 2:
+        return []
+        
+    search_pattern = f"%{search_term}%"
+    
+    resultados = db.query(Colaborador).filter(
+        or_(
+            Colaborador.cedula.ilike(search_pattern),
+            Colaborador.nombres.ilike(search_pattern),
+            Colaborador.apellidos.ilike(search_pattern)
+        )
+    ).limit(10).all()
+    
+    suggestions = []
+    for r in resultados:
+        suggestions.append({
+            "cedula": r.cedula,
+            "nombre": f"{r.apellidos} {r.nombres}".strip(),
+            "source": r.origen
+        })
+        
+    return suggestions
 
 @app.post("/export-excel")
 async def export_excel(registros: list):
