@@ -125,10 +125,35 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents))
     df = df.fillna("")
-    
+    df.columns = [str(c).strip().upper() for c in df.columns]
+
+    def find_col(keywords):
+        for col in df.columns:
+            for kw in keywords:
+                if kw in col:
+                    return col
+        return None
+
+    col_cedula = find_col(["CÉDULA DE IDENTIFICACIÓN", "CEDULA", "IDENTIFICACIÓN NACIONAL"])
+    col_apellidos = find_col(["APELLIDOS"])
+    col_nombres = find_col(["NOMBRES"])
+    col_cargo = find_col(["CARGO NOMBRE DEL PUESTO", "CARGO"])
+    col_genero = find_col(["SEXO", "GENERO"])
+    col_unidad = find_col(["UNIDAD DE NEGOCIO", "UNIDAD"])
+    col_area = find_col(["ÁREA NOMBRE", "AREA NOMBRE"])
+    col_seccion = find_col(["SECCIÓN NOMBRE", "SECCION NOMBRE"])
+    col_cc = find_col(["CENTRO DE COSTO"])
+    col_gp = find_col(["GRUPO DE PERSONAL"])
+    col_ap = find_col(["ÁREA DE PERSONAL", "AREA DE PERSONAL"])
+    col_ja = find_col(["JEFE INMEDIATO", "JEFE"])
+    col_ga = find_col(["GERENTE DE AREA", "GERENTE"])
+    col_loc = find_col(["LOCACIÓN", "LOCACION", "LOCALIDAD"])
+
     for index, row in df.iterrows():
-        cedula = str(row.get("CEDULA", row.get("Cédula", row.get("cedula", "")))).strip()
-        if not cedula:
+        if not col_cedula:
+            continue
+        cedula = str(row[col_cedula]).strip()
+        if not cedula or cedula.lower() == "nan":
             continue
             
         colaborador = db.query(Colaborador).filter(Colaborador.cedula == cedula).first()
@@ -136,19 +161,19 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
             colaborador = Colaborador(cedula=cedula)
             db.add(colaborador)
             
-        colaborador.apellidos = str(row.get("APELLIDOS", ""))
-        colaborador.nombres = str(row.get("NOMBRES", ""))
-        colaborador.cargo = str(row.get("CARGO", ""))
-        colaborador.genero = str(row.get("GENERO", ""))
-        colaborador.unidad = str(row.get("UNIDAD", ""))
-        colaborador.area = str(row.get("AREA", ""))
-        colaborador.seccion = str(row.get("SECCION", ""))
-        colaborador.centro_costo = str(row.get("CENTRO_COSTO", ""))
-        colaborador.grupo_personal = str(row.get("GRUPO_PERSONAL", ""))
-        colaborador.area_personal = str(row.get("AREA_PERSONAL", ""))
-        colaborador.jefe_area = str(row.get("JEFE_AREA", ""))
-        colaborador.gerente_area = str(row.get("GERENTE_AREA", ""))
-        colaborador.localidad = str(row.get("LOCALIDAD", ""))
+        colaborador.apellidos = str(row[col_apellidos]).strip() if col_apellidos else ""
+        colaborador.nombres = str(row[col_nombres]).strip() if col_nombres else ""
+        colaborador.cargo = str(row[col_cargo]).strip() if col_cargo else ""
+        colaborador.genero = str(row[col_genero]).strip() if col_genero else ""
+        colaborador.unidad = str(row[col_unidad]).strip() if col_unidad else ""
+        colaborador.area = str(row[col_area]).strip() if col_area else ""
+        colaborador.seccion = str(row[col_seccion]).strip() if col_seccion else ""
+        colaborador.centro_costo = str(row[col_cc]).strip() if col_cc else ""
+        colaborador.grupo_personal = str(row[col_gp]).strip() if col_gp else ""
+        colaborador.area_personal = str(row[col_ap]).strip() if col_ap else ""
+        colaborador.jefe_area = str(row[col_ja]).strip() if col_ja else ""
+        colaborador.gerente_area = str(row[col_ga]).strip() if col_ga else ""
+        colaborador.localidad = str(row[col_loc]).strip() if col_loc else ""
         colaborador.origen = source
         colaborador.ultima_actualizacion = datetime.utcnow()
         
