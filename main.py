@@ -179,7 +179,7 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
         
     db.commit()
     return {"message": "Datos procesados correctamente"}
-
+# verga para emelec
 @app.post("/validate-cedula")
 def validate_cedula(cedulas_json: str = Form(...), db: Session = Depends(get_db)):
     cedulas = json.loads(cedulas_json)
