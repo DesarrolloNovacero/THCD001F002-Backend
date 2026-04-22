@@ -267,3 +267,4 @@ async def export_excel(registros: list):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": "attachment; filename=capacitacion.xlsx"}
     )
+    #verga para emelec
