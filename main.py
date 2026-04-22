@@ -3,16 +3,24 @@ import json
 import io
 import unicodedata
 from datetime import datetime, timedelta
+from typing import Optional
+
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Text, or_
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+
+from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Text, Numeric, ForeignKey, or_
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
+import sqlalchemy
+
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 import pandas as pd
 
+# --- CONFIGURACIÓN DE BASE DE DATOS ---
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./trainform.db")
 
 if DATABASE_URL.startswith("sqlite"):
@@ -23,21 +31,24 @@ else:
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+# --- CONFIGURACIÓN DE SEGURIDAD ---
 SECRET_KEY = os.getenv("SECRET_KEY", "CLAVE_ULTRA_SECRETA_TRAINFORM")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 480
+ACCESS_TOKEN_EXPIRE_MINUTES = 480 # 8 horas
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-class User(Base):
+# --- MODELOS DE BASE DE DATOS (Adaptados a PostgreSQL/Neon) ---
+class Usuario(Base):
     __tablename__ = "usuarios"
-    id = Column(String(36), primary_key=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=sqlalchemy.text("gen_random_uuid()"))
     email = Column(String(100), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
-    nombre_completo = Column(String(100))
-    rol = Column(String(50))
-    activo = Column(Boolean, default=True)
-    fecha_creacion = Column(DateTime, default=datetime.utcnow)
+    nombre_completo = Column(String(100), nullable=False)
+    rol = Column(String(50), nullable=False)
+    activo = Column(Boolean, nullable=False, default=True)
+    fecha_creacion = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
 
 class Colaborador(Base):
     __tablename__ = "colaboradores"
@@ -56,13 +67,41 @@ class Colaborador(Base):
     gerente_area = Column(String(100))
     localidad = Column(String(100))
     origen = Column(String(20))
-    ultima_actualizacion = Column(DateTime, default=datetime.utcnow)
+    ultima_actualizacion = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
 
-class AppState(Base):
-    __tablename__ = "app_state"
-    id = Column(String(36), primary_key=True)
-    estado_json = Column(Text)
-    ultima_modificacion = Column(DateTime, default=datetime.utcnow)
+class Evento(Base):
+    __tablename__ = "eventos"
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=sqlalchemy.text("gen_random_uuid()"))
+    creado_por_usuario_id = Column(UUID(as_uuid=True), ForeignKey("usuarios.id"), nullable=False)
+    nombre_curso = Column(String(200), nullable=False)
+    objetivo = Column(String(200))
+    empresa = Column(String(100))
+    facilitador = Column(String(100))
+    dimension_evento = Column(String(100))
+    lugar = Column(String(100))
+    modalidad = Column(String(50))
+    fecha_hora_inicio = Column(DateTime)
+    fecha_hora_cierre = Column(DateTime)
+    total_horas = Column(Numeric(5, 2))
+    tipo_evento = Column(String(50))
+    mes_anio = Column(String(20))
+
+class SesionWeb(Base):
+    __tablename__ = "sesiones_web"
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=sqlalchemy.text("gen_random_uuid()"))
+    usuario_id = Column(UUID(as_uuid=True), ForeignKey("usuarios.id"), nullable=False)
+    token_sesion = Column(String(255), nullable=False, unique=True)
+    estado_borrador_json = Column(Text)
+    ultima_modificacion = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
+    expira_en = Column(DateTime, nullable=False)
+
+class Asistencia(Base):
+    __tablename__ = "asistencias"
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=sqlalchemy.text("gen_random_uuid()"))
+    evento_id = Column(UUID(as_uuid=True), ForeignKey("eventos.id"), nullable=False)
+    colaborador_cedula = Column(String(20), ForeignKey("colaboradores.cedula"), nullable=False)
+    estado_validacion = Column(String(50), nullable=False)
+    fecha_registro = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
 
 Base.metadata.create_all(bind=engine)
 
@@ -76,6 +115,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- UTILIDADES ---
 def get_db():
     db = SessionLocal()
     try:
@@ -84,17 +124,67 @@ def get_db():
         db.close()
 
 def remove_accents(text):
-    if text is None:
-        return ""
-    if not isinstance(text, str):
-        text = str(text)
+    if text is None: return ""
+    if not isinstance(text, str): text = str(text)
     text = text.strip().upper()
     text = unicodedata.normalize('NFD', text)
     return "".join(c for c in text if unicodedata.category(c) != 'Mn')
 
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+# --- DEPENDENCIAS DE SEGURIDAD ---
+def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Credenciales invalidas",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None: raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+        
+    user = db.query(Usuario).filter(Usuario.email == email).first()
+    if user is None or not user.activo:
+        raise credentials_exception
+    return user
+
+def get_current_admin(current_user: Usuario = Depends(get_current_user)):
+    if current_user.rol != "ADMIN":
+        raise HTTPException(status_code=403, detail="No tienes permisos de administrador")
+    return current_user
+
+# --- RUTAS DE LA API ---
+
+@app.post("/token")
+def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(Usuario).filter(Usuario.email == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Email o contraseña incorrectos")
+    
+    access_token = create_access_token(
+        data={"sub": user.email, "rol": user.rol}, 
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer",
+        "user_name": user.nombre_completo,
+        "user_role": user.rol
+    }
+
 @app.get("/")
 def read_root():
-    return {"status": "API en linea"}
+    return {"status": "API en linea, Segura y Conectada a Neon"}
 
 @app.get("/check-db-status")
 def check_db_status(db: Session = Depends(get_db)):
@@ -102,26 +192,33 @@ def check_db_status(db: Session = Depends(get_db)):
     return {"ready": count > 0, "count": count}
 
 @app.get("/load-state")
-def load_state(db: Session = Depends(get_db)):
-    state = db.query(AppState).first()
-    if state and state.estado_json:
-        return json.loads(state.estado_json)
+def load_state(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    # Carga el borrador especifico del usuario que inició sesión
+    sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
+    if sesion and sesion.estado_borrador_json:
+        return json.loads(sesion.estado_borrador_json)
     return None
 
 @app.post("/save-state")
-def save_state(payload: dict, db: Session = Depends(get_db)):
-    state = db.query(AppState).first()
-    if not state:
-        state = AppState(id="1", estado_json=json.dumps(payload))
-        db.add(state)
+def save_state(payload: dict = Body(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
+    if not sesion:
+        sesion = SesionWeb(
+            usuario_id=current_user.id,
+            token_sesion=f"draft_{current_user.id}", # ID unico de borrador por usuario
+            estado_borrador_json=json.dumps(payload),
+            expira_en=datetime.utcnow() + timedelta(days=7)
+        )
+        db.add(sesion)
     else:
-        state.estado_json = json.dumps(payload)
-        state.ultima_modificacion = datetime.utcnow()
+        sesion.estado_borrador_json = json.dumps(payload)
+        sesion.ultima_modificacion = datetime.utcnow()
     db.commit()
     return {"status": "ok"}
 
+# OJO: Esta ruta ahora requiere get_current_admin. Un usuario normal recibirá error 403.
 @app.post("/upload-masters")
-async def upload_masters(file: UploadFile = File(...), source: str = Form(...), db: Session = Depends(get_db)):
+async def upload_masters(file: UploadFile = File(...), source: str = Form(...), current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents), dtype=str)
     df = df.fillna("")
@@ -130,8 +227,7 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
     def find_col(keywords):
         for col in df.columns:
             for kw in keywords:
-                if kw in col:
-                    return col
+                if kw in col: return col
         return None
 
     col_cedula = find_col(["CÉDULA DE IDENTIFICACIÓN", "CEDULA", "IDENTIFICACIÓN NACIONAL"])
@@ -150,19 +246,12 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
     col_loc = find_col(["LOCACIÓN", "LOCACION", "LOCALIDAD"])
 
     for index, row in df.iterrows():
-        if not col_cedula:
-            continue
+        if not col_cedula: continue
             
         cedula = str(row[col_cedula]).strip()
-        
-        if cedula.endswith('.0'):
-            cedula = cedula[:-2]
-            
-        if not cedula or cedula.lower() == "nan":
-            continue
-            
-        if cedula.isdigit() and len(cedula) < 10:
-            cedula = cedula.zfill(10)
+        if cedula.endswith('.0'): cedula = cedula[:-2]
+        if not cedula or cedula.lower() == "nan": continue
+        if cedula.isdigit() and len(cedula) < 10: cedula = cedula.zfill(10)
             
         colaborador = db.query(Colaborador).filter(Colaborador.cedula == cedula).first()
         if not colaborador:
@@ -183,13 +272,12 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
         colaborador.gerente_area = str(row[col_ga]).strip() if col_ga else ""
         colaborador.localidad = str(row[col_loc]).strip() if col_loc else ""
         colaborador.origen = source
-        colaborador.ultima_actualizacion = datetime.utcnow()
         
     db.commit()
-    return {"message": "Datos procesados correctamente"}
+    return {"message": "Datos maestros procesados y actualizados correctamente"}
 
 @app.post("/validate-cedula")
-def validate_cedula(cedulas_json: str = Form(...), db: Session = Depends(get_db)):
+def validate_cedula(cedulas_json: str = Form(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     cedulas = json.loads(cedulas_json)
     resultados = []
     
@@ -213,30 +301,18 @@ def validate_cedula(cedulas_json: str = Form(...), db: Session = Depends(get_db)
                 "gerente_area": colaborador.gerente_area,
                 "localidad": colaborador.localidad
             }
-            resultados.append({
-                "cedula": cedula_str,
-                "found": True,
-                "source": colaborador.origen,
-                "data": data
-            })
+            resultados.append({"cedula": cedula_str, "found": True, "source": colaborador.origen, "data": data})
         else:
-            resultados.append({
-                "cedula": cedula_str,
-                "found": False,
-                "source": None,
-                "data": {}
-            })
+            resultados.append({"cedula": cedula_str, "found": False, "source": None, "data": {}})
             
     return resultados
 
 @app.post("/suggest-cedulas")
-def suggest_cedulas(search_term: str = Form(...), db: Session = Depends(get_db)):
+def suggest_cedulas(search_term: str = Form(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     search_term = search_term.strip()
-    if len(search_term) < 2:
-        return []
+    if len(search_term) < 2: return []
         
     search_pattern = f"%{search_term}%"
-    
     resultados = db.query(Colaborador).filter(
         or_(
             Colaborador.cedula.ilike(search_pattern),
@@ -245,25 +321,64 @@ def suggest_cedulas(search_term: str = Form(...), db: Session = Depends(get_db))
         )
     ).limit(10).all()
     
-    suggestions = []
-    for r in resultados:
-        suggestions.append({
-            "cedula": r.cedula,
-            "nombre": f"{r.apellidos} {r.nombres}".strip(),
-            "source": r.origen
-        })
-        
+    suggestions = [{"cedula": r.cedula, "nombre": f"{r.apellidos} {r.nombres}".strip(), "source": r.origen} for r in resultados]
     return suggestions
 
+# --- NUEVA LOGICA DE EXPORTACIÓN Y TRAZABILIDAD ---
 @app.post("/export-excel")
-async def export_excel(registros: list = Body(...)):
+async def export_excel(payload: dict = Body(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    # El frontend ahora enviará un objeto con "eventData" y "registros"
+    event_data = payload.get("eventData", {})
+    registros = payload.get("registros", [])
+    
+    if not registros:
+        raise HTTPException(status_code=400, detail="No hay registros para exportar")
+
+    # 1. Crear el Evento para la trazabilidad
+    try:
+        horas = float(event_data.get("totalHoras", 0)) if event_data.get("totalHoras") else 0.0
+    except ValueError:
+        horas = 0.0
+        
+    nuevo_evento = Evento(
+        creado_por_usuario_id=current_user.id,
+        nombre_curso=event_data.get("nombreCurso", "Sin Nombre"),
+        objetivo=event_data.get("objetivo"),
+        empresa=event_data.get("empresa"),
+        facilitador=event_data.get("facilitador"),
+        dimension_evento=event_data.get("dimensionEvento"),
+        lugar=event_data.get("lugar"),
+        modalidad=event_data.get("modalidad"),
+        total_horas=horas,
+        tipo_evento=event_data.get("tipoEvento"),
+        mes_anio=event_data.get("mesAnio")
+    )
+    db.add(nuevo_evento)
+    db.flush() # Obtiene el ID del evento antes de hacer commit
+    
+    # 2. Registrar las Asistencias
     procesados = []
     for r in registros:
+        # Trazabilidad en BD
+        cedula_colaborador = str(r.get("CÉDULA", "")).strip()
+        if cedula_colaborador:
+            nueva_asistencia = Asistencia(
+                evento_id=nuevo_evento.id,
+                colaborador_cedula=cedula_colaborador,
+                estado_validacion="VALIDADO"
+            )
+            db.add(nueva_asistencia)
+            
+        # Preparación para Excel
         fila = {}
         for key, value in r.items():
             fila[key] = remove_accents(value)
         procesados.append(fila)
 
+    # Confirmar todo en la base de datos
+    db.commit()
+
+    # 3. Generar el Excel
     df = pd.DataFrame(procesados)
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -273,6 +388,5 @@ async def export_excel(registros: list = Body(...)):
     return StreamingResponse(
         output, 
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=capacitacion.xlsx"}
+        headers={"Content-Disposition": f"attachment; filename=capacitacion_{nuevo_evento.id}.xlsx"}
     )
-    #verga para emelec
