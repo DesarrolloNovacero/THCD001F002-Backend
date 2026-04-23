@@ -527,3 +527,4 @@ def exportar_evento(evento_id: str, current_admin: Usuario = Depends(get_current
     output.seek(0)
     
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=auditoria_{evento.codigo_curso}.xlsx"})
+    
