@@ -9,7 +9,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, F
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Text, Numeric, ForeignKey, or_
+from sqlalchemy import create_engine, Column, String, Boolean, DateTime, Text, Numeric, ForeignKey, or_, func, case
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -110,6 +110,12 @@ class SesionWeb(Base):
     estado_borrador_json = Column(Text)
     ultima_modificacion = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
     expira_en = Column(DateTime, nullable=False)
+
+class MetricaMensual(Base):
+    __tablename__ = "metricas_mensuales"
+    mes_anio = Column(String(20), primary_key=True)
+    total_activos = Column(sqlalchemy.Integer, nullable=False)
+    ultima_actualizacion = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
 
 class NuevoUsuario(BaseModel):
     email: str
@@ -289,7 +295,7 @@ def save_state(payload: dict = Body(...), current_user: Usuario = Depends(get_cu
     return {"status": "ok"}
 
 @app.post("/upload-masters")
-async def upload_masters(file: UploadFile = File(...), source: str = Form(...), current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
+async def upload_masters(file: UploadFile = File(...), mes_corte: str = Form(...), current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
     contents = await file.read()
     df = pd.read_excel(io.BytesIO(contents), dtype=str)
     df = df.fillna("")
@@ -317,6 +323,8 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
     col_loc = find_col(["LOCACIÓN", "LOCACION", "LOCALIDAD"])
     col_desv = find_col(["FECHA DE DESVINCULACIÓN", "FECHA DE DESVINCULACION", "DESVINCULACION"])
 
+    conteo_activos = 0
+
     for index, row in df.iterrows():
         if not col_cedula: continue
             
@@ -332,6 +340,10 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
 
         val_desv = str(row[col_desv]).strip().upper() if col_desv else ""
         es_cesado = bool(val_desv and val_desv != "NAN" and val_desv != "NAT" and val_desv != "NONE")
+        estado_final = "CESADO" if es_cesado else "ACTIVO"
+        
+        if estado_final == "ACTIVO":
+            conteo_activos += 1
             
         colaborador.apellidos = str(row[col_apellidos]).strip() if col_apellidos else ""
         colaborador.nombres = str(row[col_nombres]).strip() if col_nombres else ""
@@ -346,11 +358,18 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
         colaborador.jefe_area = str(row[col_ja]).strip() if col_ja else ""
         colaborador.gerente_area = str(row[col_ga]).strip() if col_ga else ""
         colaborador.localidad = str(row[col_loc]).strip() if col_loc else ""
-        colaborador.origen = source
-        colaborador.estado_laboral = "CESADO" if es_cesado else "ACTIVO"
+        colaborador.origen = "maestro"
+        colaborador.estado_laboral = estado_final
+        
+    metrica = db.query(MetricaMensual).filter(MetricaMensual.mes_anio == mes_corte).first()
+    if metrica:
+        metrica.total_activos = conteo_activos
+        metrica.ultima_actualizacion = datetime.utcnow()
+    else:
+        db.add(MetricaMensual(mes_anio=mes_corte, total_activos=conteo_activos))
         
     db.commit()
-    return {"message": "Datos maestros unificados y procesados"}
+    return {"message": "Datos maestros unificados y métricas actualizadas"}
 
 @app.post("/validate-cedula")
 def validate_cedula(cedulas_json: str = Form(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -552,3 +571,93 @@ def exportar_evento(evento_id: str, current_admin: Usuario = Depends(get_current
     output.seek(0)
     
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=auditoria_{evento.codigo_curso}.xlsx"})
+
+@app.get("/dashboard/metricas")
+def obtener_metricas(mes: str, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
+    
+    eventos_aprobados = db.query(Evento).filter(Evento.estado == "APROBADO", Evento.mes_anio == mes).all()
+    ids_eventos = [e.id for e in eventos_aprobados]
+    
+    if not ids_eventos:
+        return {
+            "kpis": {"total_colaboradores": 0, "total_horas": 0, "horas_promedio": 0, "total_cursos": 0, "personal_capacitado_pct": 0},
+            "graficos": {"modalidad": [], "genero": [], "dimension_grupo": [], "unidad_negocio": [], "localidad": []}
+        }
+        
+    metrica_mes = db.query(MetricaMensual).filter(MetricaMensual.mes_anio == mes).first()
+    total_empresa = metrica_mes.total_activos if metrica_mes and metrica_mes.total_activos > 0 else 1
+
+    total_cursos = len(eventos_aprobados)
+    horas_promedio = sum(float(e.total_horas or 0) for e in eventos_aprobados) / total_cursos if total_cursos > 0 else 0
+
+    asistencias = db.query(
+        Asistencia.colaborador_cedula,
+        Evento.total_horas,
+        Colaborador.genero,
+        Colaborador.unidad,
+        Colaborador.localidad,
+        Colaborador.grupo_personal,
+        Evento.modalidad,
+        Evento.dimension_evento
+    ).join(Evento, Asistencia.evento_id == Evento.id)\
+     .join(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula)\
+     .filter(Evento.id.in_(ids_eventos)).all()
+
+    cedulas_unicas = set()
+    total_horas = 0
+    mod_dic = {}
+    gen_dic = {}
+    uni_dic = {}
+    loc_dic = {}
+    dim_grp_dic = {}
+
+    for a in asistencias:
+        cedula = a.colaborador_cedula
+        horas = float(a.total_horas or 0)
+        gen = a.genero or "NO DEFINIDO"
+        mod = a.modalidad or "NO DEFINIDA"
+        uni = a.unidad or "NO DEFINIDA"
+        loc = a.localidad or "NO DEFINIDA"
+        grp = a.grupo_personal or "NO DEFINIDO"
+        dim = a.dimension_evento or "NO DEFINIDA"
+
+        cedulas_unicas.add(cedula)
+        total_horas += horas
+
+        mod_dic[mod] = mod_dic.get(mod, 0) + horas
+        gen_dic[gen] = gen_dic.get(gen, 0) + horas
+        uni_dic[uni] = uni_dic.get(uni, 0) + horas
+        loc_dic[loc] = loc_dic.get(loc, 0) + horas
+
+        if dim not in dim_grp_dic:
+            dim_grp_dic[dim] = {}
+        dim_grp_dic[dim][grp] = dim_grp_dic[dim].get(grp, 0) + horas
+
+    total_colaboradores = len(cedulas_unicas)
+    porcentaje_capacitado = (total_colaboradores / total_empresa) * 100
+
+    formatear_dic = lambda d: [{"name": k, "value": round(v, 1)} for k, v in d.items()]
+    
+    dim_grp_lista = []
+    for d_name, grp_data in dim_grp_dic.items():
+        obj = {"dimension": d_name}
+        for g_name, hrs in grp_data.items():
+            obj[g_name] = round(hrs, 1)
+        dim_grp_lista.append(obj)
+
+    return {
+        "kpis": {
+            "total_colaboradores": total_colaboradores,
+            "total_horas": round(total_horas, 1),
+            "horas_promedio": round(horas_promedio, 1),
+            "total_cursos": total_cursos,
+            "personal_capacitado_pct": round(porcentaje_capacitado, 2)
+        },
+        "graficos": {
+            "modalidad": formatear_dic(mod_dic),
+            "genero": formatear_dic(gen_dic),
+            "unidad_negocio": formatear_dic(uni_dic),
+            "localidad": formatear_dic(loc_dic),
+            "dimension_grupo": dim_grp_lista
+        }
+    }
