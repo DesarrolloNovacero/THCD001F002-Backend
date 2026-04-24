@@ -62,6 +62,7 @@ class Colaborador(Base):
     gerente_area = Column(String(100))
     localidad = Column(String(100))
     origen = Column(String(20))
+    estado_laboral = Column(String(20), default="ACTIVO")
     ultima_actualizacion = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
 
 class Evento(Base):
@@ -314,6 +315,7 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
     col_ja = find_col(["JEFE INMEDIATO", "JEFE"])
     col_ga = find_col(["GERENTE DE AREA", "GERENTE"])
     col_loc = find_col(["LOCACIÓN", "LOCACION", "LOCALIDAD"])
+    col_desv = find_col(["FECHA DE DESVINCULACIÓN", "FECHA DE DESVINCULACION", "DESVINCULACION"])
 
     for index, row in df.iterrows():
         if not col_cedula: continue
@@ -327,6 +329,9 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
         if not colaborador:
             colaborador = Colaborador(cedula=cedula)
             db.add(colaborador)
+
+        val_desv = str(row[col_desv]).strip().upper() if col_desv else ""
+        es_cesado = bool(val_desv and val_desv != "NAN" and val_desv != "NAT" and val_desv != "NONE")
             
         colaborador.apellidos = str(row[col_apellidos]).strip() if col_apellidos else ""
         colaborador.nombres = str(row[col_nombres]).strip() if col_nombres else ""
@@ -342,9 +347,10 @@ async def upload_masters(file: UploadFile = File(...), source: str = Form(...), 
         colaborador.gerente_area = str(row[col_ga]).strip() if col_ga else ""
         colaborador.localidad = str(row[col_loc]).strip() if col_loc else ""
         colaborador.origen = source
+        colaborador.estado_laboral = "CESADO" if es_cesado else "ACTIVO"
         
     db.commit()
-    return {"message": "Datos maestros actualizados"}
+    return {"message": "Datos maestros unificados y procesados"}
 
 @app.post("/validate-cedula")
 def validate_cedula(cedulas_json: str = Form(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -369,7 +375,8 @@ def validate_cedula(cedulas_json: str = Form(...), current_user: Usuario = Depen
                 "gerente_area": colaborador.gerente_area,
                 "localidad": colaborador.localidad
             }
-            resultados.append({"cedula": cedula_str, "found": True, "source": colaborador.origen, "data": data})
+            fake_source = "cesantes" if colaborador.estado_laboral == "CESADO" else "headcount"
+            resultados.append({"cedula": cedula_str, "found": True, "source": fake_source, "data": data})
         else:
             resultados.append({"cedula": cedula_str, "found": False, "source": None, "data": {}})
     return resultados
@@ -382,7 +389,12 @@ def suggest_cedulas(search_term: str = Form(...), current_user: Usuario = Depend
     resultados = db.query(Colaborador).filter(
         or_(Colaborador.cedula.ilike(search_pattern), Colaborador.nombres.ilike(search_pattern), Colaborador.apellidos.ilike(search_pattern))
     ).limit(10).all()
-    return [{"cedula": r.cedula, "nombre": f"{r.apellidos} {r.nombres}".strip(), "source": r.origen} for r in resultados]
+    
+    sugs = []
+    for r in resultados:
+        fake_source = "cesantes" if r.estado_laboral == "CESADO" else "headcount"
+        sugs.append({"cedula": r.cedula, "nombre": f"{r.apellidos} {r.nombres}".strip(), "source": fake_source})
+    return sugs
 
 @app.post("/enviar-revision")
 def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
