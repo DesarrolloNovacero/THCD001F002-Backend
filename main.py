@@ -116,6 +116,9 @@ class NuevoUsuario(BaseModel):
     nombre_completo: str
     rol: str
 
+class UpdatePasswordModel(BaseModel):
+    password: str
+
 class AuditoriaAccion(BaseModel):
     comentario: str
 
@@ -227,6 +230,16 @@ def toggle_usuario(user_id: str, current_admin: Usuario = Depends(get_current_ad
     usuario.activo = not usuario.activo
     db.commit()
     return {"message": "Estado actualizado", "activo": usuario.activo}
+
+@app.put("/usuarios/{user_id}/password")
+def cambiar_password(user_id: str, data: UpdatePasswordModel, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
+    usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    hash_generado = pwd_context.hash(data.password)
+    usuario.password_hash = hash_generado
+    db.commit()
+    return {"message": "Contraseña actualizada exitosamente"}
 
 @app.delete("/usuarios/{user_id}")
 def eliminar_usuario(user_id: str, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
@@ -527,4 +540,3 @@ def exportar_evento(evento_id: str, current_admin: Usuario = Depends(get_current
     output.seek(0)
     
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=auditoria_{evento.codigo_curso}.xlsx"})
-    
