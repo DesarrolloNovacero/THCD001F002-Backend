@@ -555,7 +555,7 @@ def exportar_evento(evento_id: str, current_admin: Usuario = Depends(get_current
     output.seek(0)
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=auditoria_{evento.codigo_curso}.xlsx"})
 
-def get_kpis_for_month(mes_str: str, db: Session):
+def get_kpis_for_month(mes_str: str, estado: str, db: Session):
     eventos_aprobados = db.query(Evento).filter(Evento.estado == "APROBADO", Evento.mes_anio == mes_str).all()
     ids_eventos = [e.id for e in eventos_aprobados]
     
@@ -564,7 +564,12 @@ def get_kpis_for_month(mes_str: str, db: Session):
     metrica_mes = db.query(MetricaMensual).filter(MetricaMensual.mes_anio == mes_str).first()
     total_empresa = metrica_mes.total_activos if metrica_mes and metrica_mes.total_activos > 0 else 1
 
-    asistencias = db.query(Asistencia.colaborador_cedula, Evento.total_horas).join(Evento, Asistencia.evento_id == Evento.id).filter(Evento.id.in_(ids_eventos)).all()
+    query = db.query(Asistencia.colaborador_cedula, Evento.total_horas).join(Evento, Asistencia.evento_id == Evento.id).join(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula).filter(Evento.id.in_(ids_eventos))
+    
+    if estado != "TODOS":
+        query = query.filter(Colaborador.estado_laboral == estado)
+
+    asistencias = query.all()
 
     cedulas_unicas = set()
     total_horas = 0
@@ -576,7 +581,7 @@ def get_kpis_for_month(mes_str: str, db: Session):
     return total_horas, porcentaje_capacitado
 
 @app.get("/dashboard/metricas")
-def obtener_metricas(mes: str, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
+def obtener_metricas(mes: str, estado: str = "TODOS", current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
     
     try:
         y, m = map(int, mes.split('-'))
@@ -584,7 +589,7 @@ def obtener_metricas(mes: str, current_admin: Usuario = Depends(get_current_admi
     except:
         prev_mes = ""
 
-    prev_horas, prev_pct = get_kpis_for_month(prev_mes, db) if prev_mes else (0, 0)
+    prev_horas, prev_pct = get_kpis_for_month(prev_mes, estado, db) if prev_mes else (0, 0)
     
     eventos_aprobados = db.query(Evento).filter(Evento.estado == "APROBADO", Evento.mes_anio == mes).all()
     ids_eventos = [e.id for e in eventos_aprobados]
@@ -601,7 +606,12 @@ def obtener_metricas(mes: str, current_admin: Usuario = Depends(get_current_admi
     total_cursos = len(eventos_aprobados)
     horas_promedio = sum(float(e.total_horas or 0) for e in eventos_aprobados) / total_cursos if total_cursos > 0 else 0
 
-    asistencias = db.query(Asistencia.colaborador_cedula, Evento.total_horas, Colaborador.genero, Colaborador.unidad, Evento.localidad, Colaborador.grupo_personal, Evento.modalidad, Evento.dimension_evento).join(Evento, Asistencia.evento_id == Evento.id).join(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula).filter(Evento.id.in_(ids_eventos)).all()
+    query = db.query(Asistencia.colaborador_cedula, Evento.total_horas, Colaborador.genero, Colaborador.unidad, Evento.localidad, Colaborador.grupo_personal, Evento.modalidad, Evento.dimension_evento).join(Evento, Asistencia.evento_id == Evento.id).join(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula).filter(Evento.id.in_(ids_eventos))
+
+    if estado != "TODOS":
+        query = query.filter(Colaborador.estado_laboral == estado)
+
+    asistencias = query.all()
 
     cedulas_unicas = set()
     total_horas = 0
