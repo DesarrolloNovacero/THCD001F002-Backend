@@ -523,16 +523,31 @@ def exportar_evento(evento_id: str, current_admin: Usuario = Depends(get_current
         colab = db.query(Colaborador).filter(Colaborador.cedula == a.colaborador_cedula).first()
         if not colab: continue
         procesados.append({
-            "CÓDIGO CURSO": evento.codigo_curso, "NOMBRE DEL CURSO": evento.nombre_curso, "OBJETIVO": evento.objetivo,
-            "EMPRESA CAPACITADORA": evento.empresa, "FACILITADOR": evento.facilitador, "DIMENSIÓN DE EVENTO": evento.dimension_evento,
-            "LUGAR DONDE SE DIO LA CAPACITACION": evento.lugar, "MODALIDAD": evento.modalidad,
+            "NOMBRE DEL CURSO": evento.nombre_curso,
+            "OBJETIVO": evento.objetivo,
+            "EMPRESA CAPACITADORA": evento.empresa,
+            "FACILITADOR": evento.facilitador,
+            "DIMENSIÓN DE EVENTO": evento.dimension_evento,
+            "LUGAR DONDE SE DIO LA CAPACITACION": evento.lugar,
+            "MODALIDAD": evento.modalidad,
             "FECHA INICIO": evento.fecha_hora_inicio.strftime('%d/%m/%Y') if evento.fecha_hora_inicio else '',
             "FECHA CIERRE": evento.fecha_hora_cierre.strftime('%d/%m/%Y') if evento.fecha_hora_cierre else '',
-            "DURACION DE LA CAPACITACION (HORAS)": str(evento.total_horas), "TIPO EVENTO": evento.tipo_evento,
-            "MES-AÑO": evento.mes_anio, "CÉDULA": colab.cedula, "APELLIDOS Y NOMBRE DEL COLABORADOR": f"{colab.apellidos} {colab.nombres}".strip(),
-            "GÉNERO": colab.genero, "CARGO": colab.cargo, "UNIDAD": colab.unidad, "ÁREA": colab.area, "SECCIÓN": colab.seccion,
-            "CENTRO DE COSTO": colab.centro_costo, "GRUPO DE PERSONAL": colab.grupo_personal, "ÁREA DE PERSONAL": colab.area_personal,
-            "JEFE DE ÁREA": colab.jefe_area, "GERENTE DE AREA": colab.gerente_area, "LOCALIDAD": colab.localidad,
+            "DURACION DE LA CAPACITACION (HORAS)": str(evento.total_horas),
+            "TIPO EVENTO": evento.tipo_evento,
+            "MES-AÑO": evento.mes_anio,
+            "CÉDULA": colab.cedula,
+            "APELLIDOS Y NOMBRE DEL COLABORADOR": f"{colab.apellidos} {colab.nombres}".strip(),
+            "GÉNERO": colab.genero,
+            "CARGO": colab.cargo,
+            "UNIDAD": colab.unidad,
+            "ÁREA": colab.area,
+            "SECCIÓN": colab.seccion,
+            "CENTRO DE COSTO": colab.centro_costo,
+            "GRUPO DE PERSONAL": colab.grupo_personal,
+            "ÁREA DE PERSONAL": colab.area_personal,
+            "JEFE DE ÁREA": colab.jefe_area,
+            "GERENTE DE AREA": colab.gerente_area,
+            "LOCALIDAD": evento.localidad,
         })
     df = pd.DataFrame(procesados)
     output = io.BytesIO()
@@ -626,4 +641,3 @@ def obtener_metricas(mes: str, current_admin: Usuario = Depends(get_current_admi
         "tendencias": {"diferencia_horas": round(total_horas - prev_horas, 1), "diferencia_pct": round(porcentaje_capacitado - prev_pct, 2)},
         "graficos": {"modalidad": formatear_dic(mod_dic), "genero": formatear_dic(gen_dic), "unidad_negocio": formatear_dic(uni_dic), "localidad": formatear_dic(loc_dic), "dimension_grupo": dim_grp_lista}
     }
-    
