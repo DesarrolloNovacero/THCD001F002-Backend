@@ -42,7 +42,14 @@ class Usuario(Base):
     password_hash = Column(String(255), nullable=False)
     nombre_completo = Column(String(100), nullable=False)
     rol = Column(String(50), nullable=False)
+    localidad = Column(String(50), nullable=False, default="Quito")
     activo = Column(Boolean, nullable=False, default=True)
+    fecha_creacion = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
+
+class EmpresaCapacitadora(Base):
+    __tablename__ = "empresas_capacitadoras"
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=sqlalchemy.text("gen_random_uuid()"))
+    nombre = Column(String(150), unique=True, nullable=False)
     fecha_creacion = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
 
 class Colaborador(Base):
@@ -83,6 +90,7 @@ class Evento(Base):
     tipo_evento = Column(String(50))
     mes_anio = Column(String(20))
     estado = Column(String(50), default="PENDIENTE")
+    localidad = Column(String(50))
     fecha_creacion = Column(DateTime, server_default=sqlalchemy.text("CURRENT_TIMESTAMP"))
 
 class Asistencia(Base):
@@ -122,6 +130,10 @@ class NuevoUsuario(BaseModel):
     password: str
     nombre_completo: str
     rol: str
+    localidad: str
+
+class NuevaEmpresa(BaseModel):
+    nombre: str
 
 class UpdatePasswordModel(BaseModel):
     password: str
@@ -148,12 +160,14 @@ def get_db():
     finally:
         db.close()
 
-def remove_accents(text):
-    if text is None: return ""
-    if not isinstance(text, str): text = str(text)
-    text = text.strip().upper()
-    text = unicodedata.normalize('NFD', text)
-    return "".join(c for c in text if unicodedata.category(c) != 'Mn')
+def parse_iso_date(date_str):
+    if not date_str: return None
+    try:
+        dt = pd.to_datetime(date_str)
+        if pd.isna(dt): return None
+        return dt.replace(tzinfo=None).to_pydatetime()
+    except:
+        return None
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -184,7 +198,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 def get_current_admin(current_user: Usuario = Depends(get_current_user)):
     if current_user.rol != "ADMIN":
-        raise HTTPException(status_code=403, detail="No tienes permisos de administrador")
+        raise HTTPException(status_code=403, detail="No tienes permisos")
     return current_user
 
 @app.post("/token")
@@ -201,7 +215,8 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
         "access_token": access_token, 
         "token_type": "bearer",
         "user_name": user.nombre_completo,
-        "user_role": user.rol
+        "user_role": user.rol,
+        "user_location": user.localidad
     }
 
 @app.post("/crear-usuario")
@@ -211,29 +226,21 @@ def crear_usuario(data: NuevoUsuario, current_admin: Usuario = Depends(get_curre
         raise HTTPException(status_code=400, detail="Este correo ya está registrado")
         
     hash_generado = pwd_context.hash(data.password)
-    
-    nuevo_usuario = Usuario(
-        email=data.email,
-        password_hash=hash_generado,
-        nombre_completo=data.nombre_completo,
-        rol=data.rol
-    )
+    nuevo_usuario = Usuario(email=data.email, password_hash=hash_generado, nombre_completo=data.nombre_completo, rol=data.rol, localidad=data.localidad)
     db.add(nuevo_usuario)
     db.commit()
-    return {"message": f"Usuario {data.nombre_completo} creado exitosamente"}
+    return {"message": "Usuario creado"}
 
 @app.get("/usuarios")
 def listar_usuarios(current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
     usuarios = db.query(Usuario).order_by(Usuario.fecha_creacion.desc()).all()
-    return [{"id": str(u.id), "email": u.email, "nombre_completo": u.nombre_completo, "rol": u.rol, "activo": u.activo} for u in usuarios]
+    return [{"id": str(u.id), "email": u.email, "nombre_completo": u.nombre_completo, "rol": u.rol, "activo": u.activo, "localidad": u.localidad} for u in usuarios]
 
 @app.put("/usuarios/{user_id}/toggle")
 def toggle_usuario(user_id: str, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
-    if str(current_admin.id) == user_id:
-        raise HTTPException(status_code=400, detail="No puedes desactivar tu cuenta")
+    if str(current_admin.id) == user_id: raise HTTPException(status_code=400)
     usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
-    if not usuario:
-        raise HTTPException(status_code=404)
+    if not usuario: raise HTTPException(status_code=404)
     usuario.activo = not usuario.activo
     db.commit()
     return {"message": "Estado actualizado", "activo": usuario.activo}
@@ -241,29 +248,42 @@ def toggle_usuario(user_id: str, current_admin: Usuario = Depends(get_current_ad
 @app.put("/usuarios/{user_id}/password")
 def cambiar_password(user_id: str, data: UpdatePasswordModel, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
     usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
-    if not usuario:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-    hash_generado = pwd_context.hash(data.password)
-    usuario.password_hash = hash_generado
+    if not usuario: raise HTTPException(status_code=404)
+    usuario.password_hash = pwd_context.hash(data.password)
     db.commit()
-    return {"message": "Contraseña actualizada exitosamente"}
+    return {"message": "Contraseña actualizada"}
 
 @app.delete("/usuarios/{user_id}")
 def eliminar_usuario(user_id: str, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
-    if str(current_admin.id) == user_id:
-        raise HTTPException(status_code=400, detail="No puedes eliminar tu cuenta")
+    if str(current_admin.id) == user_id: raise HTTPException(status_code=400)
     usuario = db.query(Usuario).filter(Usuario.id == user_id).first()
-    if not usuario:
-        raise HTTPException(status_code=404)
-    
-    tiene_eventos = db.query(Evento).filter(Evento.creado_por_usuario_id == user_id).first()
-    if tiene_eventos:
-        raise HTTPException(status_code=400, detail="Desactívalo, tiene eventos registrados.")
-        
+    if not usuario: raise HTTPException(status_code=404)
+    if db.query(Evento).filter(Evento.creado_por_usuario_id == user_id).first(): raise HTTPException(status_code=400, detail="Desactívalo, tiene eventos.")
     db.query(SesionWeb).filter(SesionWeb.usuario_id == user_id).delete()
     db.delete(usuario)
     db.commit()
     return {"message": "Usuario eliminado"}
+
+@app.get("/empresas")
+def listar_empresas(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    empresas = db.query(EmpresaCapacitadora).order_by(EmpresaCapacitadora.nombre).all()
+    return [{"id": str(e.id), "nombre": e.nombre} for e in empresas]
+
+@app.post("/empresas")
+def crear_empresa(data: NuevaEmpresa, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
+    existe = db.query(EmpresaCapacitadora).filter(EmpresaCapacitadora.nombre.ilike(data.nombre)).first()
+    if existe: raise HTTPException(status_code=400, detail="La empresa ya existe")
+    db.add(EmpresaCapacitadora(nombre=data.nombre.upper().strip()))
+    db.commit()
+    return {"message": "Empresa añadida"}
+
+@app.delete("/empresas/{empresa_id}")
+def eliminar_empresa(empresa_id: str, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
+    emp = db.query(EmpresaCapacitadora).filter(EmpresaCapacitadora.id == empresa_id).first()
+    if not emp: raise HTTPException(status_code=404)
+    db.delete(emp)
+    db.commit()
+    return {"message": "Empresa eliminada"}
 
 @app.get("/check-db-status")
 def check_db_status(db: Session = Depends(get_db)):
@@ -273,20 +293,14 @@ def check_db_status(db: Session = Depends(get_db)):
 @app.get("/load-state")
 def load_state(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
-    if sesion and sesion.estado_borrador_json:
-        return json.loads(sesion.estado_borrador_json)
+    if sesion and sesion.estado_borrador_json: return json.loads(sesion.estado_borrador_json)
     return None
 
 @app.post("/save-state")
 def save_state(payload: dict = Body(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
     if not sesion:
-        sesion = SesionWeb(
-            usuario_id=current_user.id,
-            token_sesion=f"draft_{current_user.id}",
-            estado_borrador_json=json.dumps(payload),
-            expira_en=datetime.utcnow() + timedelta(days=7)
-        )
+        sesion = SesionWeb(usuario_id=current_user.id, token_sesion=f"draft_{current_user.id}", estado_borrador_json=json.dumps(payload), expira_en=datetime.utcnow() + timedelta(days=7))
         db.add(sesion)
     else:
         sesion.estado_borrador_json = json.dumps(payload)
@@ -327,7 +341,6 @@ async def upload_masters(file: UploadFile = File(...), mes_corte: str = Form(...
 
     for index, row in df.iterrows():
         if not col_cedula: continue
-            
         cedula = str(row[col_cedula]).strip()
         if cedula.endswith('.0'): cedula = cedula[:-2]
         if not cedula or cedula.lower() == "nan": continue
@@ -341,9 +354,7 @@ async def upload_masters(file: UploadFile = File(...), mes_corte: str = Form(...
         val_desv = str(row[col_desv]).strip().upper() if col_desv else ""
         es_cesado = bool(val_desv and val_desv != "NAN" and val_desv != "NAT" and val_desv != "NONE")
         estado_final = "CESADO" if es_cesado else "ACTIVO"
-        
-        if estado_final == "ACTIVO":
-            conteo_activos += 1
+        if estado_final == "ACTIVO": conteo_activos += 1
             
         colaborador.apellidos = str(row[col_apellidos]).strip() if col_apellidos else ""
         colaborador.nombres = str(row[col_nombres]).strip() if col_nombres else ""
@@ -369,7 +380,7 @@ async def upload_masters(file: UploadFile = File(...), mes_corte: str = Form(...
         db.add(MetricaMensual(mes_anio=mes_corte, total_activos=conteo_activos))
         
     db.commit()
-    return {"message": "Datos maestros unificados y métricas actualizadas"}
+    return {"message": "Datos maestros unificados"}
 
 @app.post("/validate-cedula")
 def validate_cedula(cedulas_json: str = Form(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -380,19 +391,10 @@ def validate_cedula(cedulas_json: str = Form(...), current_user: Usuario = Depen
         colaborador = db.query(Colaborador).filter(Colaborador.cedula == cedula_str).first()
         if colaborador:
             data = {
-                "apellidos": colaborador.apellidos,
-                "nombres": colaborador.nombres,
-                "cargo": colaborador.cargo,
-                "genero": colaborador.genero,
-                "unidad": colaborador.unidad,
-                "area": colaborador.area,
-                "seccion": colaborador.seccion,
-                "centro_costo": colaborador.centro_costo,
-                "grupo_personal": colaborador.grupo_personal,
-                "area_personal": colaborador.area_personal,
-                "jefe_area": colaborador.jefe_area,
-                "gerente_area": colaborador.gerente_area,
-                "localidad": colaborador.localidad
+                "apellidos": colaborador.apellidos, "nombres": colaborador.nombres, "cargo": colaborador.cargo,
+                "genero": colaborador.genero, "unidad": colaborador.unidad, "area": colaborador.area, "seccion": colaborador.seccion,
+                "centro_costo": colaborador.centro_costo, "grupo_personal": colaborador.grupo_personal, "area_personal": colaborador.area_personal,
+                "jefe_area": colaborador.jefe_area, "gerente_area": colaborador.gerente_area, "localidad": colaborador.localidad
             }
             fake_source = "cesantes" if colaborador.estado_laboral == "CESADO" else "headcount"
             resultados.append({"cedula": cedula_str, "found": True, "source": fake_source, "data": data})
@@ -408,7 +410,6 @@ def suggest_cedulas(search_term: str = Form(...), current_user: Usuario = Depend
     resultados = db.query(Colaborador).filter(
         or_(Colaborador.cedula.ilike(search_pattern), Colaborador.nombres.ilike(search_pattern), Colaborador.apellidos.ilike(search_pattern))
     ).limit(10).all()
-    
     sugs = []
     for r in resultados:
         fake_source = "cesantes" if r.estado_laboral == "CESADO" else "headcount"
@@ -421,18 +422,19 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
     registros = payload.get("registros", [])
     evento_id = payload.get("eventoId")
 
-    if not registros:
-        raise HTTPException(status_code=400, detail="No hay registros")
+    if not registros: raise HTTPException(status_code=400, detail="No hay registros")
 
-    try:
-        horas = float(event_data.get("totalHoras", 0)) if event_data.get("totalHoras") else 0.0
-    except ValueError:
-        horas = 0.0
+    try: horas = float(event_data.get("totalHoras", 0)) if event_data.get("totalHoras") else 0.0
+    except ValueError: horas = 0.0
+
+    inicio_dt = parse_iso_date(event_data.get("fechaHoraInicio"))
+    cierre_dt = parse_iso_date(event_data.get("fechaHoraCierre"))
+    loc_curso = event_data.get("localidadCurso")
+    if not loc_curso: loc_curso = current_user.localidad
 
     if evento_id:
         evento = db.query(Evento).filter(Evento.id == evento_id).first()
-        if not evento:
-            raise HTTPException(status_code=404)
+        if not evento: raise HTTPException(status_code=404)
         evento.nombre_curso = event_data.get("nombreCurso", "Sin Nombre")
         evento.objetivo = event_data.get("objetivo")
         evento.empresa = event_data.get("empresa")
@@ -440,36 +442,30 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
         evento.dimension_evento = event_data.get("dimensionEvento")
         evento.lugar = event_data.get("lugar")
         evento.modalidad = event_data.get("modalidad")
+        evento.fecha_hora_inicio = inicio_dt
+        evento.fecha_hora_cierre = cierre_dt
         evento.total_horas = horas
         evento.tipo_evento = event_data.get("tipoEvento")
         evento.mes_anio = event_data.get("mesAnio")
+        evento.localidad = loc_curso
         evento.estado = "PENDIENTE"
         db.query(Asistencia).filter(Asistencia.evento_id == evento_id).delete()
     else:
         count = db.query(Evento).count() + 1
         codigo = f"NOV-{datetime.utcnow().year}-{str(count).zfill(4)}"
         evento = Evento(
-            codigo_curso=codigo,
-            creado_por_usuario_id=current_user.id,
-            nombre_curso=event_data.get("nombreCurso", "Sin Nombre"),
-            objetivo=event_data.get("objetivo"),
-            empresa=event_data.get("empresa"),
-            facilitador=event_data.get("facilitador"),
-            dimension_evento=event_data.get("dimensionEvento"),
-            lugar=event_data.get("lugar"),
-            modalidad=event_data.get("modalidad"),
-            total_horas=horas,
-            tipo_evento=event_data.get("tipoEvento"),
-            mes_anio=event_data.get("mesAnio"),
-            estado="PENDIENTE"
+            codigo_curso=codigo, creado_por_usuario_id=current_user.id, nombre_curso=event_data.get("nombreCurso", "Sin Nombre"),
+            objetivo=event_data.get("objetivo"), empresa=event_data.get("empresa"), facilitador=event_data.get("facilitador"),
+            dimension_evento=event_data.get("dimensionEvento"), lugar=event_data.get("lugar"), modalidad=event_data.get("modalidad"),
+            fecha_hora_inicio=inicio_dt, fecha_hora_cierre=cierre_dt, total_horas=horas, tipo_evento=event_data.get("tipoEvento"),
+            mes_anio=event_data.get("mesAnio"), localidad=loc_curso, estado="PENDIENTE"
         )
         db.add(evento)
         db.flush()
 
     for r in registros:
         cedula_colaborador = str(r.get("CÉDULA", "")).strip()
-        if cedula_colaborador:
-            db.add(Asistencia(evento_id=evento.id, colaborador_cedula=cedula_colaborador, estado_validacion="VALIDADO"))
+        if cedula_colaborador: db.add(Asistencia(evento_id=evento.id, colaborador_cedula=cedula_colaborador, estado_validacion="VALIDADO"))
 
     db.add(HistorialEvento(evento_id=evento.id, usuario_id=current_user.id, accion="ENVIADO A REVISION", comentario=""))
     db.commit()
@@ -482,12 +478,8 @@ def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session =
     for e in eventos:
         historial = db.query(HistorialEvento).filter(HistorialEvento.evento_id == e.id).order_by(HistorialEvento.fecha_registro.desc()).first()
         res.append({
-            "id": str(e.id),
-            "codigo": e.codigo_curso,
-            "nombre": e.nombre_curso,
-            "estado": e.estado,
-            "fecha": e.fecha_creacion,
-            "comentario": historial.comentario if historial else ""
+            "id": str(e.id), "codigo": e.codigo_curso, "nombre": e.nombre_curso, "estado": e.estado,
+            "fecha": e.fecha_creacion, "comentario": historial.comentario if historial else ""
         })
     return res
 
@@ -498,12 +490,8 @@ def admin_eventos(current_admin: Usuario = Depends(get_current_admin), db: Sessi
     for e in eventos:
         usuario = db.query(Usuario).filter(Usuario.id == e.creado_por_usuario_id).first()
         res.append({
-            "id": str(e.id),
-            "codigo": e.codigo_curso,
-            "nombre": e.nombre_curso,
-            "estado": e.estado,
-            "creador": usuario.nombre_completo if usuario else "Desconocido",
-            "fecha": e.fecha_creacion
+            "id": str(e.id), "codigo": e.codigo_curso, "nombre": e.nombre_curso, "estado": e.estado,
+            "creador": usuario.nombre_completo if usuario else "Desconocido", "fecha": e.fecha_creacion
         })
     return res
 
@@ -530,86 +518,44 @@ def exportar_evento(evento_id: str, current_admin: Usuario = Depends(get_current
     evento = db.query(Evento).filter(Evento.id == evento_id).first()
     if not evento: raise HTTPException(status_code=404)
     asistencias = db.query(Asistencia).filter(Asistencia.evento_id == evento.id).all()
-    
     procesados = []
     for a in asistencias:
         colab = db.query(Colaborador).filter(Colaborador.cedula == a.colaborador_cedula).first()
         if not colab: continue
         procesados.append({
-            "CÓDIGO CURSO": evento.codigo_curso,
-            "NOMBRE DEL CURSO": evento.nombre_curso,
-            "OBJETIVO": evento.objetivo,
-            "EMPRESA CAPACITADORA": evento.empresa,
-            "FACILITADOR": evento.facilitador,
-            "DIMENSIÓN DE EVENTO": evento.dimension_evento,
-            "LUGAR DONDE SE DIO LA CAPACITACION": evento.lugar,
-            "MODALIDAD": evento.modalidad,
+            "CÓDIGO CURSO": evento.codigo_curso, "NOMBRE DEL CURSO": evento.nombre_curso, "OBJETIVO": evento.objetivo,
+            "EMPRESA CAPACITADORA": evento.empresa, "FACILITADOR": evento.facilitador, "DIMENSIÓN DE EVENTO": evento.dimension_evento,
+            "LUGAR DONDE SE DIO LA CAPACITACION": evento.lugar, "MODALIDAD": evento.modalidad,
             "FECHA INICIO": evento.fecha_hora_inicio.strftime('%d/%m/%Y') if evento.fecha_hora_inicio else '',
             "FECHA CIERRE": evento.fecha_hora_cierre.strftime('%d/%m/%Y') if evento.fecha_hora_cierre else '',
-            "DURACION DE LA CAPACITACION (HORAS)": str(evento.total_horas),
-            "TIPO EVENTO": evento.tipo_evento,
-            "MES-AÑO": evento.mes_anio,
-            "CÉDULA": colab.cedula,
-            "APELLIDOS Y NOMBRE DEL COLABORADOR": f"{colab.apellidos} {colab.nombres}".strip(),
-            "GÉNERO": colab.genero,
-            "CARGO": colab.cargo,
-            "UNIDAD": colab.unidad,
-            "ÁREA": colab.area,
-            "SECCIÓN": colab.seccion,
-            "CENTRO DE COSTO": colab.centro_costo,
-            "GRUPO DE PERSONAL": colab.grupo_personal,
-            "ÁREA DE PERSONAL": colab.area_personal,
-            "JEFE DE ÁREA": colab.jefe_area,
-            "GERENTE DE AREA": colab.gerente_area,
-            "LOCALIDAD": colab.localidad,
+            "DURACION DE LA CAPACITACION (HORAS)": str(evento.total_horas), "TIPO EVENTO": evento.tipo_evento,
+            "MES-AÑO": evento.mes_anio, "CÉDULA": colab.cedula, "APELLIDOS Y NOMBRE DEL COLABORADOR": f"{colab.apellidos} {colab.nombres}".strip(),
+            "GÉNERO": colab.genero, "CARGO": colab.cargo, "UNIDAD": colab.unidad, "ÁREA": colab.area, "SECCIÓN": colab.seccion,
+            "CENTRO DE COSTO": colab.centro_costo, "GRUPO DE PERSONAL": colab.grupo_personal, "ÁREA DE PERSONAL": colab.area_personal,
+            "JEFE DE ÁREA": colab.jefe_area, "GERENTE DE AREA": colab.gerente_area, "LOCALIDAD": colab.localidad,
         })
-
     df = pd.DataFrame(procesados)
     output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Auditoria')
+    with pd.ExcelWriter(output, engine='openpyxl') as writer: df.to_excel(writer, index=False, sheet_name='Auditoria')
     output.seek(0)
-    
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=auditoria_{evento.codigo_curso}.xlsx"})
 
 @app.get("/dashboard/metricas")
 def obtener_metricas(mes: str, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
-    
     eventos_aprobados = db.query(Evento).filter(Evento.estado == "APROBADO", Evento.mes_anio == mes).all()
     ids_eventos = [e.id for e in eventos_aprobados]
-    
-    if not ids_eventos:
-        return {
-            "kpis": {"total_colaboradores": 0, "total_horas": 0, "horas_promedio": 0, "total_cursos": 0, "personal_capacitado_pct": 0},
-            "graficos": {"modalidad": [], "genero": [], "dimension_grupo": [], "unidad_negocio": [], "localidad": []}
-        }
+    if not ids_eventos: return {"kpis": {"total_colaboradores": 0, "total_horas": 0, "horas_promedio": 0, "total_cursos": 0, "personal_capacitado_pct": 0}, "graficos": {"modalidad": [], "genero": [], "dimension_grupo": [], "unidad_negocio": [], "localidad": []}}
         
     metrica_mes = db.query(MetricaMensual).filter(MetricaMensual.mes_anio == mes).first()
     total_empresa = metrica_mes.total_activos if metrica_mes and metrica_mes.total_activos > 0 else 1
-
     total_cursos = len(eventos_aprobados)
     horas_promedio = sum(float(e.total_horas or 0) for e in eventos_aprobados) / total_cursos if total_cursos > 0 else 0
 
-    asistencias = db.query(
-        Asistencia.colaborador_cedula,
-        Evento.total_horas,
-        Colaborador.genero,
-        Colaborador.unidad,
-        Colaborador.localidad,
-        Colaborador.grupo_personal,
-        Evento.modalidad,
-        Evento.dimension_evento
-    ).join(Evento, Asistencia.evento_id == Evento.id)\
-     .join(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula)\
-     .filter(Evento.id.in_(ids_eventos)).all()
+    asistencias = db.query(Asistencia.colaborador_cedula, Evento.total_horas, Colaborador.genero, Colaborador.unidad, Evento.localidad, Colaborador.grupo_personal, Evento.modalidad, Evento.dimension_evento).join(Evento, Asistencia.evento_id == Evento.id).join(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula).filter(Evento.id.in_(ids_eventos)).all()
 
     cedulas_unicas = set()
     total_horas = 0
-    mod_dic = {}
-    gen_dic = {}
-    uni_dic = {}
-    loc_dic = {}
-    dim_grp_dic = {}
+    mod_dic, gen_dic, uni_dic, loc_dic, dim_grp_dic = {}, {}, {}, {}, {}
 
     for a in asistencias:
         cedula = a.colaborador_cedula
@@ -623,41 +569,24 @@ def obtener_metricas(mes: str, current_admin: Usuario = Depends(get_current_admi
 
         cedulas_unicas.add(cedula)
         total_horas += horas
-
         mod_dic[mod] = mod_dic.get(mod, 0) + horas
         gen_dic[gen] = gen_dic.get(gen, 0) + horas
         uni_dic[uni] = uni_dic.get(uni, 0) + horas
         loc_dic[loc] = loc_dic.get(loc, 0) + horas
-
-        if dim not in dim_grp_dic:
-            dim_grp_dic[dim] = {}
+        if dim not in dim_grp_dic: dim_grp_dic[dim] = {}
         dim_grp_dic[dim][grp] = dim_grp_dic[dim].get(grp, 0) + horas
 
     total_colaboradores = len(cedulas_unicas)
     porcentaje_capacitado = (total_colaboradores / total_empresa) * 100
-
     formatear_dic = lambda d: [{"name": k, "value": round(v, 1)} for k, v in d.items()]
     
     dim_grp_lista = []
     for d_name, grp_data in dim_grp_dic.items():
         obj = {"dimension": d_name}
-        for g_name, hrs in grp_data.items():
-            obj[g_name] = round(hrs, 1)
+        for g_name, hrs in grp_data.items(): obj[g_name] = round(hrs, 1)
         dim_grp_lista.append(obj)
 
     return {
-        "kpis": {
-            "total_colaboradores": total_colaboradores,
-            "total_horas": round(total_horas, 1),
-            "horas_promedio": round(horas_promedio, 1),
-            "total_cursos": total_cursos,
-            "personal_capacitado_pct": round(porcentaje_capacitado, 2)
-        },
-        "graficos": {
-            "modalidad": formatear_dic(mod_dic),
-            "genero": formatear_dic(gen_dic),
-            "unidad_negocio": formatear_dic(uni_dic),
-            "localidad": formatear_dic(loc_dic),
-            "dimension_grupo": dim_grp_lista
-        }
+        "kpis": {"total_colaboradores": total_colaboradores, "total_horas": round(total_horas, 1), "horas_promedio": round(horas_promedio, 1), "total_cursos": total_cursos, "personal_capacitado_pct": round(porcentaje_capacitado, 2)},
+        "graficos": {"modalidad": formatear_dic(mod_dic), "genero": formatear_dic(gen_dic), "unidad_negocio": formatear_dic(uni_dic), "localidad": formatear_dic(loc_dic), "dimension_grupo": dim_grp_lista}
     }
