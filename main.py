@@ -558,23 +558,25 @@ def exportar_evento(evento_id: str, current_admin: Usuario = Depends(get_current
 #---
 
 def get_kpis_for_month(mes_str: str, estado: str, db: Session):
-    try:
-        y, m = map(int, mes_str.split('-'))
-        start_date = datetime(y, m, 1)
-        end_date = datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)
-    except:
-        return 0, 0
-        
-    query = db.query(Asistencia.colaborador_cedula, Evento.total_horas)\
+    mes_busqueda = mes_str
+    if len(mes_str) == 7 and mes_str[5] == '0':
+        mes_alternativo = mes_str[:5] + mes_str[6:]
+    else:
+        mes_alternativo = mes_str
+
+    query = db.query(Asistencia.id, Asistencia.colaborador_cedula, Evento.total_horas)\
               .join(Evento, Asistencia.evento_id == Evento.id)\
               .outerjoin(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula)\
-              .filter(sqlalchemy.and_(Evento.fecha_hora_inicio >= start_date, Evento.fecha_hora_inicio < end_date))
+              .filter(or_(Evento.mes_anio.ilike(f"%{mes_busqueda}%"), Evento.mes_anio.ilike(f"%{mes_alternativo}%")))
     
+    query = query.filter(Evento.estado != "RECHAZADO")
+
     if estado != "TODOS":
         query = query.filter(Colaborador.estado_laboral == estado)
 
     asistencias = query.all()
-    if not asistencias: return 0, 0
+    if not asistencias:
+        return 0, 0
 
     metrica_mes = db.query(MetricaMensual).filter(MetricaMensual.mes_anio == mes_str).first()
     total_empresa = metrica_mes.total_activos if metrica_mes and metrica_mes.total_activos > 0 else 1
@@ -588,88 +590,7 @@ def get_kpis_for_month(mes_str: str, estado: str, db: Session):
     porcentaje_capacitado = (len(cedulas_unicas) / total_empresa) * 100
     return total_horas, porcentaje_capacitado
 
-@app.get("/dashboard/metricas")
-def obtener_metricas(mes: str, estado: str = "TODOS", current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
-    try:
-        y, m = map(int, mes.split('-'))
-        start_date = datetime(y, m, 1)
-        end_date = datetime(y + 1, 1, 1) if m == 12 else datetime(y, m + 1, 1)
-    except:
-        raise HTTPException(status_code=400, detail="Formato de mes invalido")
 
-    prev_mes = f"{y-1}-12" if m == 1 else f"{y}-{m-1:02d}"
-    prev_horas, prev_pct = get_kpis_for_month(prev_mes, estado, db) if prev_mes else (0, 0)
-    
-    query_base = db.query(
-        Asistencia.id,
-        Asistencia.colaborador_cedula, 
-        Evento.total_horas, 
-        Colaborador.genero, 
-        Colaborador.unidad, 
-        Evento.localidad, 
-        Colaborador.grupo_personal, 
-        Evento.modalidad, 
-        Evento.dimension_evento,
-        Evento.nombre_curso
-    ).join(Evento, Asistencia.evento_id == Evento.id)\
-     .outerjoin(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula)\
-     .filter(sqlalchemy.and_(Evento.fecha_hora_inicio >= start_date, Evento.fecha_hora_inicio < end_date))
-
-    if estado != "TODOS":
-        query_base = query_base.filter(Colaborador.estado_laboral == estado)
-
-    asistencias = query_base.all()
-
-    if not asistencias:
-        return {
-            "kpis": {"total_colaboradores": 0, "total_horas": 0, "horas_promedio": 0, "total_cursos": 0, "personal_capacitado_pct": 0},
-            "tendencias": {"diferencia_horas": round(0 - prev_horas, 1), "diferencia_pct": round(0 - prev_pct, 2)},
-            "graficos": {"modalidad": [], "genero": [], "dimension_grupo": [], "unidad_negocio": [], "localidad": []}
-        }
-        
-    metrica_mes = db.query(MetricaMensual).filter(MetricaMensual.mes_anio == mes).first()
-    total_empresa = metrica_mes.total_activos if metrica_mes and metrica_mes.total_activos > 0 else 1
-
-    nombres_cursos_unicos = set()
-    cedulas_unicas = set()
-    total_horas = 0
-    mod_dic, gen_dic, uni_dic, loc_dic, dim_grp_dic = {}, {}, {}, {}, {}
-
-    for a in asistencias:
-        nombres_cursos_unicos.add(a.nombre_curso)
-        cedulas_unicas.add(a.colaborador_cedula)
-        hrs = float(a.total_horas or 0)
-        total_horas += hrs
-        
-        g, m_val, u, l, gp, d = (a.genero or "NO DEFINIDO"), (a.modalidad or "NO DEFINIDA"), (a.unidad or "NO DEFINIDA"), (a.localidad or "NO DEFINIDA"), (a.grupo_personal or "NO DEFINIDO"), (a.dimension_evento or "NO DEFINIDA")
-
-        mod_dic[m_val] = mod_dic.get(m_val, 0) + hrs
-        gen_dic[g] = gen_dic.get(g, 0) + hrs
-        uni_dic[u] = uni_dic.get(u, 0) + hrs
-        loc_dic[l] = loc_dic.get(l, 0) + hrs
-        if d not in dim_grp_dic: dim_grp_dic[d] = {}
-        dim_grp_dic[d][gp] = dim_grp_dic[d].get(gp, 0) + hrs
-
-    return {
-        "kpis": {
-            "total_colaboradores": len(cedulas_unicas), 
-            "total_horas": round(total_horas, 1), 
-            "horas_promedio": round(total_horas / len(asistencias), 1) if asistencias else 0, 
-            "total_cursos": len(nombres_cursos_unicos), 
-            "personal_capacitado_pct": round((len(cedulas_unicas) / total_empresa) * 100, 2)
-        },
-        "tendencias": {
-            "diferencia_horas": round(total_horas - prev_horas, 1), 
-            "diferencia_pct": round(((len(cedulas_unicas) / total_empresa) * 100) - prev_pct, 2)
-        },
-        "graficos": {
-            "modalidad": [{"name": k, "value": round(v, 1)} for k, v in mod_dic.items()],
-            "genero": [{"name": k, "value": round(v, 1)} for k, v in gen_dic.items()],
-            "unidad_negocio": [{"name": k, "value": round(v, 1)} for k, v in uni_dic.items()],
-            "localidad": [{"name": k, "value": round(v, 1)} for k, v in loc_dic.items()],
-            "dimension_grupo": [{"dimension": d, **{grp: round(h, 1) for grp, h in grps.items()}} for d, grps in dim_grp_dic.items()]
-        }
-    }
 
 #---
 @app.get("/dashboard/metricas")
