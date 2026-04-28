@@ -626,3 +626,4 @@ def obtener_metricas(mes: str, current_admin: Usuario = Depends(get_current_admi
         "tendencias": {"diferencia_horas": round(total_horas - prev_horas, 1), "diferencia_pct": round(porcentaje_capacitado - prev_pct, 2)},
         "graficos": {"modalidad": formatear_dic(mod_dic), "genero": formatear_dic(gen_dic), "unidad_negocio": formatear_dic(uni_dic), "localidad": formatear_dic(loc_dic), "dimension_grupo": dim_grp_lista}
     }
+    
