@@ -512,6 +512,48 @@ def rechazar_evento(evento_id: str, accion: AuditoriaAccion, current_admin: Usua
     db.commit()
     return {"message": "Rechazado"}
 
+@app.get("/admin/eventos/{evento_id}/exportar")
+def exportar_evento(evento_id: str, current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
+    evento = db.query(Evento).filter(Evento.id == evento_id).first()
+    if not evento: raise HTTPException(status_code=404)
+    asistencias = db.query(Asistencia).filter(Asistencia.evento_id == evento.id).all()
+    procesados = []
+    for a in asistencias:
+        colab = db.query(Colaborador).filter(Colaborador.cedula == a.colaborador_cedula).first()
+        if not colab: continue
+        procesados.append({
+            "NOMBRE DEL CURSO": evento.nombre_curso,
+            "OBJETIVO": evento.objetivo,
+            "EMPRESA CAPACITADORA": evento.empresa,
+            "FACILITADOR": evento.facilitador,
+            "DIMENSIÓN DE EVENTO": evento.dimension_evento,
+            "LUGAR DONDE SE DIO LA CAPACITACION": evento.lugar,
+            "MODALIDAD": evento.modalidad,
+            "FECHA INICIO": evento.fecha_hora_inicio.strftime('%d/%m/%Y') if evento.fecha_hora_inicio else '',
+            "FECHA CIERRE": evento.fecha_hora_cierre.strftime('%d/%m/%Y') if evento.fecha_hora_cierre else '',
+            "DURACION DE LA CAPACITACION (HORAS)": str(evento.total_horas),
+            "TIPO EVENTO": evento.tipo_evento,
+            "MES-AÑO": evento.mes_anio,
+            "CÉDULA": colab.cedula,
+            "APELLIDOS Y NOMBRE DEL COLABORADOR": f"{colab.apellidos} {colab.nombres}".strip(),
+            "GÉNERO": colab.genero,
+            "CARGO": colab.cargo,
+            "UNIDAD": colab.unidad,
+            "ÁREA": colab.area,
+            "SECCIÓN": colab.seccion,
+            "CENTRO DE COSTO": colab.centro_costo,
+            "GRUPO DE PERSONAL": colab.grupo_personal,
+            "ÁREA DE PERSONAL": colab.area_personal,
+            "JEFE DE ÁREA": colab.jefe_area,
+            "GERENTE DE AREA": colab.gerente_area,
+            "LOCALIDAD": evento.localidad,
+        })
+    df = pd.DataFrame(procesados)
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer: df.to_excel(writer, index=False, sheet_name='Auditoria')
+    output.seek(0)
+    return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=auditoria_{evento.codigo_curso}.xlsx"})
+
 def get_kpis_for_period(period_str: str, vista: str, estado: str, db: Session):
     query = db.query(Asistencia.id, Asistencia.colaborador_cedula, Evento.total_horas, Evento.id.label("evento_id"))\
               .join(Evento, Asistencia.evento_id == Evento.id)\
@@ -519,48 +561,49 @@ def get_kpis_for_period(period_str: str, vista: str, estado: str, db: Session):
               .filter(Evento.estado != "RECHAZADO")
 
     if vista == "ANUAL":
-        query = query.filter(Evento.mes_anio.like(f"{period_str}%"))
+        query = query.filter(Evento.mes_anio.like(f"{period_str.split('-')[0]}%"))
     else:
         try:
             y, m = map(int, period_str.split('-'))
-            query = query.filter(or_(Evento.mes_anio == period_str, Evento.mes_anio == f"{y}-{m}"))
+            mes_alternativo = f"{y}-{m}"
         except ValueError:
-            query = query.filter(Evento.mes_anio == period_str)
+            mes_alternativo = period_str
+        query = query.filter(or_(Evento.mes_anio == period_str, Evento.mes_anio == mes_alternativo))
 
     if estado != "TODOS":
         query = query.filter(Colaborador.estado_laboral == estado)
 
     asistencias = query.all()
-    if not asistencias: return 0, 0, 0
+    if not asistencias: return 0, 0
 
     metrica = db.query(func.avg(MetricaMensual.total_activos)).filter(MetricaMensual.mes_anio.like(f"{period_str.split('-')[0]}%")).scalar() or 1
     
     cedulas_unicas = set()
-    ids_eventos = set()
     total_horas = 0
     for a in asistencias:
         cedulas_unicas.add(a.colaborador_cedula)
-        ids_eventos.add(a.evento_id)
         total_horas += float(a.total_horas or 0)
 
     porcentaje = (len(cedulas_unicas) / metrica) * 100
-    return total_horas, porcentaje, len(ids_eventos)
+    return total_horas, porcentaje
 
 @app.get("/dashboard/metricas")
 def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
     try:
-        y, m = map(int, mes.split('-')) if '-' in mes else (int(mes), 1)
-        
         if vista == "ANUAL":
+            y = int(mes.split('-')[0]) if '-' in mes else int(mes)
             prev_periodo = str(y - 1)
             periodo_busqueda = str(y)
+            mes_alternativo = str(y)
         else:
+            y, m = map(int, mes.split('-'))
             prev_periodo = f"{y-1}-12" if m == 1 else f"{y}-{m-1:02d}"
             periodo_busqueda = mes
-
-        prev_horas, prev_pct, _ = get_kpis_for_period(prev_periodo, vista, estado, db)
+            mes_alternativo = f"{y}-{m}"
     except:
         raise HTTPException(status_code=400, detail="Formato invalido")
+
+    prev_horas, prev_pct = get_kpis_for_period(prev_periodo, vista, estado, db)
 
     query_base = db.query(
         Asistencia.id, Asistencia.evento_id, Asistencia.colaborador_cedula, Evento.total_horas,
@@ -573,16 +616,19 @@ def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", cu
     if vista == "ANUAL":
         query_base = query_base.filter(Evento.mes_anio.like(f"{y}%"))
     else:
-        query_base = query_base.filter(or_(Evento.mes_anio == periodo_busqueda, Evento.mes_anio == f"{y}-{m}"))
+        query_base = query_base.filter(or_(Evento.mes_anio == periodo_busqueda, Evento.mes_anio == mes_alternativo))
 
     if estado != "TODOS":
         query_base = query_base.filter(Colaborador.estado_laboral == estado)
 
     asistencias = query_base.all()
+    
     if not asistencias:
-        return {"kpis": {"total_colaboradores": 0, "total_horas": 0, "horas_promedio": 0, "total_cursos": 0, "personal_capacitado_pct": 0},
-                "tendencias": {"diferencia_horas": round(0 - prev_horas, 1), "diferencia_pct": round(0 - prev_pct, 2)},
-                "graficos": {"modalidad": [], "genero": [], "dimension_grupo": [], "unidad_negocio": [], "localidad": []}}
+        return {
+            "kpis": {"total_colaboradores": 0, "total_horas": 0, "horas_promedio": 0, "total_cursos": 0, "personal_capacitado_pct": 0},
+            "tendencias": {"diferencia_horas": round(0 - prev_horas, 1), "diferencia_pct": round(0 - prev_pct, 2)},
+            "graficos": {"modalidad": [], "genero": [], "dimension_grupo": [], "unidad_negocio": [], "localidad": []}
+        }
 
     total_activos = db.query(func.avg(MetricaMensual.total_activos)).filter(MetricaMensual.mes_anio.like(f"{y}%")).scalar() or 1
     
@@ -595,7 +641,13 @@ def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", cu
         hrs = float(a.total_horas or 0)
         total_h += hrs
         
-        g, m_v, u, l, gp, d = (a.genero or "NO DEFINIDO"), (a.modalidad or "NO DEFINIDA"), (a.unidad or "NO DEFINIDA"), (a.localidad or "NO DEFINIDA"), (a.grupo_personal or "NO DEFINIDO"), (a.dimension_evento or "NO DEFINIDA")
+        g = a.genero or "NO DEFINIDO"
+        m_v = a.modalidad or "NO DEFINIDA"
+        u = a.unidad or "NO DEFINIDA"
+        l = a.localidad or "NO DEFINIDA"
+        gp = a.grupo_personal or "NO DEFINIDO"
+        d = a.dimension_evento or "NO DEFINIDA"
+        
         mod_dic[m_v] = mod_dic.get(m_v, 0) + hrs
         gen_dic[g] = gen_dic.get(g, 0) + hrs
         uni_dic[u] = uni_dic.get(u, 0) + hrs
@@ -605,20 +657,23 @@ def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", cu
 
     pct_final = round((len(ceds) / total_activos) * 100, 2)
 
+    formatear_dic = lambda d: [{"name": k, "value": round(v, 1)} for k, v in d.items()]
+    dim_grp_lista = [{"dimension": d_name, **{g_name: round(hrs_val, 1) for g_name, hrs_val in grp_data.items()}} for d_name, grp_data in dim_grp_dic.items()]
+
     return {
         "kpis": {"total_colaboradores": len(ceds), "total_horas": round(total_h, 1), "horas_promedio": round(total_h / len(asistencias), 1), "total_cursos": len(ids_ev), "personal_capacitado_pct": pct_final},
         "tendencias": {"diferencia_horas": round(total_h - prev_horas, 1), "diferencia_pct": round(pct_final - prev_pct, 2)},
         "graficos": {
-            "modalidad": [{"name": k, "value": round(v, 1)} for k, v in mod_dic.items()],
-            "genero": [{"name": k, "value": round(v, 1)} for k, v in gen_dic.items()],
-            "unidad_negocio": [{"name": k, "value": round(v, 1)} for k, v in uni_dic.items()],
-            "localidad": [{"name": k, "value": round(v, 1)} for k, v in loc_dic.items()],
-            "dimension_grupo": [{"dimension": d, **{grp: round(h, 1) for grp, h in grps.items()}} for d, grps in dim_grp_dic.items()]
+            "modalidad": formatear_dic(mod_dic),
+            "genero": formatear_dic(gen_dic),
+            "unidad_negocio": formatear_dic(uni_dic),
+            "localidad": formatear_dic(loc_dic),
+            "dimension_grupo": dim_grp_lista
         }
     }
 
 @app.get("/dashboard/exportar")
-def exportar_dashboard(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", current_admin: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+def exportar_dashboard(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
     query = db.query(
         Evento.nombre_curso.label("NOMBRE DEL CURSO"), Evento.objetivo.label("OBJETIVO"), Evento.empresa.label("EMPRESA CAPACITADORA"),
         Evento.facilitador.label("FACILITADOR"), Evento.dimension_evento.label("DIMENSIÓN DE EVENTO"), Evento.lugar.label("LUGAR CAPACITACION"),
@@ -634,8 +689,12 @@ def exportar_dashboard(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", 
     if vista == "ANUAL":
         query = query.filter(Evento.mes_anio.like(f"{mes.split('-')[0]}%"))
     else:
-        y, m = map(int, mes.split('-'))
-        query = query.filter(or_(Evento.mes_anio == mes, Evento.mes_anio == f"{y}-{m}"))
+        try:
+            y, m = map(int, mes.split('-'))
+            mes_alternativo = f"{y}-{m}"
+        except ValueError:
+            mes_alternativo = mes
+        query = query.filter(or_(Evento.mes_anio == mes, Evento.mes_anio == mes_alternativo))
 
     if estado != "TODOS":
         query = query.filter(Colaborador.estado_laboral == estado)
