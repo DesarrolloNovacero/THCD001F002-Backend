@@ -555,21 +555,19 @@ def exportar_evento(evento_id: str, current_admin: Usuario = Depends(get_current
     output.seek(0)
     return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=auditoria_{evento.codigo_curso}.xlsx"})
 
-def get_kpis_for_month(mes_str: str, estado: str, db: Session):
-    eventos_aprobados = db.query(Evento).filter(Evento.estado == "APROBADO", Evento.mes_anio == mes_str).all()
-    ids_eventos = [e.id for e in eventos_aprobados]
-    
-    if not ids_eventos: return 0, 0
-        
-    metrica_mes = db.query(MetricaMensual).filter(MetricaMensual.mes_anio == mes_str).first()
-    total_empresa = metrica_mes.total_activos if metrica_mes and metrica_mes.total_activos > 0 else 1
 
-    query = db.query(Asistencia.colaborador_cedula, Evento.total_horas).join(Evento, Asistencia.evento_id == Evento.id).outerjoin(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula).filter(Evento.id.in_(ids_eventos))
+def get_kpis_for_month(mes_str: str, estado: str, db: Session):
+    query = db.query(Asistencia.colaborador_cedula, Evento.total_horas).join(Evento, Asistencia.evento_id == Evento.id).outerjoin(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula).filter(Evento.estado == "APROBADO", Evento.mes_anio == mes_str)
     
     if estado != "TODOS":
         query = query.filter(Colaborador.estado_laboral == estado)
 
     asistencias = query.all()
+    if not asistencias:
+        return 0, 0
+
+    metrica_mes = db.query(MetricaMensual).filter(MetricaMensual.mes_anio == mes_str).first()
+    total_empresa = metrica_mes.total_activos if metrica_mes and metrica_mes.total_activos > 0 else 1
 
     cedulas_unicas = set()
     total_horas = 0
@@ -579,6 +577,105 @@ def get_kpis_for_month(mes_str: str, estado: str, db: Session):
 
     porcentaje_capacitado = (len(cedulas_unicas) / total_empresa) * 100
     return total_horas, porcentaje_capacitado
+
+@app.get("/dashboard/metricas")
+def obtener_metricas(mes: str, estado: str = "TODOS", current_admin: Usuario = Depends(get_current_admin), db: Session = Depends(get_db)):
+    try:
+        y, m = map(int, mes.split('-'))
+        prev_mes = f"{y-1}-12" if m == 1 else f"{y}-{m-1:02d}"
+    except:
+        prev_mes = ""
+
+    prev_horas, prev_pct = get_kpis_for_month(prev_mes, estado, db) if prev_mes else (0, 0)
+    
+    query_base = db.query(
+        Asistencia.colaborador_cedula, 
+        Evento.total_horas, 
+        Colaborador.genero, 
+        Colaborador.unidad, 
+        Evento.localidad, 
+        Colaborador.grupo_personal, 
+        Evento.modalidad, 
+        Evento.dimension_evento,
+        Evento.nombre_curso
+    ).join(Evento, Asistencia.evento_id == Evento.id).outerjoin(Colaborador, Asistencia.colaborador_cedula == Colaborador.cedula).filter(Evento.estado == "APROBADO", Evento.mes_anio == mes)
+
+    if estado != "TODOS":
+        query_base = query_base.filter(Colaborador.estado_laboral == estado)
+
+    asistencias = query_base.all()
+
+    if not asistencias:
+        return {
+            "kpis": {"total_colaboradores": 0, "total_horas": 0, "horas_promedio": 0, "total_cursos": 0, "personal_capacitado_pct": 0},
+            "tendencias": {"diferencia_horas": 0 - prev_horas, "diferencia_pct": 0 - prev_pct},
+            "graficos": {"modalidad": [], "genero": [], "dimension_grupo": [], "unidad_negocio": [], "localidad": []}
+        }
+        
+    metrica_mes = db.query(MetricaMensual).filter(MetricaMensual.mes_anio == mes).first()
+    total_empresa = metrica_mes.total_activos if metrica_mes and metrica_mes.total_activos > 0 else 1
+
+    nombres_cursos_unicos = set()
+    cedulas_unicas = set()
+    total_horas = 0
+    mod_dic, gen_dic, uni_dic, loc_dic, dim_grp_dic = {}, {}, {}, {}, {}
+
+    for a in asistencias:
+        nombres_cursos_unicos.add(a.nombre_curso)
+        cedula = a.colaborador_cedula
+        horas = float(a.total_horas or 0)
+        gen = a.genero or "NO DEFINIDO"
+        mod = a.modalidad or "NO DEFINIDA"
+        uni = a.unidad or "NO DEFINIDA"
+        loc = a.localidad or "NO DEFINIDA"
+        grp = a.grupo_personal or "NO DEFINIDO"
+        dim = a.dimension_evento or "NO DEFINIDA"
+
+        cedulas_unicas.add(cedula)
+        total_horas += horas
+        
+        mod_dic[mod] = mod_dic.get(mod, 0) + horas
+        gen_dic[gen] = gen_dic.get(gen, 0) + horas
+        uni_dic[uni] = uni_dic.get(uni, 0) + horas
+        loc_dic[loc] = loc_dic.get(loc, 0) + horas
+        
+        if dim not in dim_grp_dic: dim_grp_dic[dim] = {}
+        dim_grp_dic[dim][grp] = dim_grp_dic[dim].get(grp, 0) + horas
+
+    total_cursos = len(nombres_cursos_unicos)
+    total_colaboradores = len(cedulas_unicas)
+    porcentaje_capacitado = (total_colaboradores / total_empresa) * 100
+    horas_promedio = total_horas / len(asistencias) if len(asistencias) > 0 else 0
+
+    formatear_dic = lambda d: [{"name": k, "value": round(v, 1)} for k, v in d.items()]
+    
+    dim_grp_lista = []
+    for d_name, grp_data in dim_grp_dic.items():
+        obj = {"dimension": d_name}
+        for g_name, hrs in grp_data.items(): obj[g_name] = round(hrs, 1)
+        dim_grp_lista.append(obj)
+
+    return {
+        "kpis": {
+            "total_colaboradores": total_colaboradores, 
+            "total_horas": round(total_horas, 1), 
+            "horas_promedio": round(horas_promedio, 1), 
+            "total_cursos": total_cursos, 
+            "personal_capacitado_pct": round(porcentaje_capacitado, 2)
+        },
+        "tendencias": {
+            "diferencia_horas": round(total_horas - prev_horas, 1), 
+            "diferencia_pct": round(porcentaje_capacitado - prev_pct, 2)
+        },
+        "graficos": {
+            "modalidad": formatear_dic(mod_dic), 
+            "genero": formatear_dic(gen_dic), 
+            "unidad_negocio": formatear_dic(uni_dic), 
+            "localidad": formatear_dic(loc_dic), 
+            "dimension_grupo": dim_grp_lista
+        }
+    }
+
 
 @app.get("/dashboard/metricas")
 def obtener_metricas(mes: str, estado: str = "TODOS", current_admin: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
