@@ -30,8 +30,6 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 480
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# --- MODELOS ---
-
 class Usuario(Base):
     __tablename__ = "usuarios"
     id = Column(UUID(as_uuid=True), primary_key=True, server_default=sqlalchemy.text("gen_random_uuid()"))
@@ -62,7 +60,7 @@ class Colaborador(Base):
     centro_costo = Column(String(50))
     grupo_personal = Column(String(50))
     area_personal = Column(String(50))
-    jefe_area = Column(String(100))
+    jefe_inmediato = Column(String(100))
     gerente_area = Column(String(100))
     localidad = Column(String(100))
     origen = Column(String(20))
@@ -284,26 +282,32 @@ async def upload_masters(file: UploadFile = File(...), mes_corte: str = Form(...
                 if kw in col: return col
         return None
 
-    col_cedula = find_col(["CEDULA", "IDENTIFICACIÓN"])
+    col_cedula = find_col(["IDENTIFICACIÓN NACIONAL", "CEDULA", "IDENTIFICACION"])
     col_apellidos = find_col(["APELLIDOS"])
     col_nombres = find_col(["NOMBRES"])
-    col_cargo = find_col(["CARGO"])
-    col_genero = find_col(["GENERO", "SEXO"])
-    col_unidad = find_col(["UNIDAD"])
-    col_area = find_col(["AREA"])
-    col_seccion = find_col(["SECCION"])
+    col_cargo = find_col(["CARGO NOMBRE DEL PUESTO", "CARGO"])
+    col_genero = find_col(["SEXO", "GENERO"])
+    col_unidad = find_col(["UNIDAD DE NEGOCIO", "UNIDAD"])
+    col_area = find_col(["ÁREA NOMBRE", "AREA NOMBRE"])
+    col_seccion = find_col(["SECCIÓN NOMBRE", "SECCION NOMBRE"])
     col_cc = find_col(["CENTRO DE COSTO"])
     col_gp = find_col(["GRUPO DE PERSONAL"])
-    col_ap = find_col(["AREA DE PERSONAL"])
-    col_ja = find_col(["JEFE INMEDIATO", "JEFE"])
-    col_ga = find_col(["GERENTE"])
-    col_loc = find_col(["LOCALIDAD", "LOCACION"])
-    col_desv = find_col(["DESVINCULACION", "EGRESO"])
+    col_ap = find_col(["ÁREA DE PERSONAL", "AREA DE PERSONAL"])
+    
+    if "JEFE INMEDIATO.1" in df.columns:
+        col_ji = "JEFE INMEDIATO.1"
+    else:
+        col_ji = find_col(["JEFE INMEDIATO"])
+        
+    col_ga = find_col(["GERENTE DE AREA"])
+    col_loc = find_col(["LOCACIÓN NOMBRE", "LOCALIDAD", "LOCACION"])
+    col_desv = find_col(["FECHA DE DESVINCULACIÓN", "DESVINCULACION"])
 
     conteo_activos = 0
     for index, row in df.iterrows():
         cedula = str(row[col_cedula]).strip() if col_cedula else ""
         if not cedula or cedula.lower() == "nan": continue
+        if cedula.isdigit() and len(cedula) < 10: cedula = cedula.zfill(10)
         
         colaborador = db.query(Colaborador).filter(Colaborador.cedula == cedula).first()
         if not colaborador:
@@ -311,7 +315,7 @@ async def upload_masters(file: UploadFile = File(...), mes_corte: str = Form(...
             db.add(colaborador)
 
         val_desv = str(row[col_desv]).strip().upper() if col_desv else ""
-        estado_final = "CESADO" if val_desv and val_desv != "NAN" else "ACTIVO"
+        estado_final = "CESADO" if (val_desv and val_desv not in ["NAN", "NAT", "NONE", ""]) else "ACTIVO"
         if estado_final == "ACTIVO": conteo_activos += 1
             
         colaborador.apellidos = str(row[col_apellidos]).strip() if col_apellidos else ""
@@ -324,7 +328,7 @@ async def upload_masters(file: UploadFile = File(...), mes_corte: str = Form(...
         colaborador.centro_costo = str(row[col_cc]).strip() if col_cc else ""
         colaborador.grupo_personal = str(row[col_gp]).strip() if col_gp else ""
         colaborador.area_personal = str(row[col_ap]).strip() if col_ap else ""
-        colaborador.jefe_area = str(row[col_ja]).strip() if col_ja else ""
+        colaborador.jefe_inmediato = str(row[col_ji]).strip() if col_ji else ""
         colaborador.gerente_area = str(row[col_ga]).strip() if col_ga else ""
         colaborador.localidad = str(row[col_loc]).strip() if col_loc else ""
         colaborador.origen = "maestro"
@@ -349,7 +353,17 @@ def validate_cedula(cedulas_json: str = Form(...), db: Session = Depends(get_db)
     for c in cedulas:
         colab = db.query(Colaborador).filter(Colaborador.cedula == str(c).strip()).first()
         if colab:
-            resultados.append({"cedula": colab.cedula, "found": True, "source": "headcount" if colab.estado_laboral=="ACTIVO" else "cesantes", "data": {"nombres": colab.nombres, "apellidos": colab.apellidos, "cargo": colab.cargo, "unidad": colab.unidad, "area": colab.area, "localidad": colab.localidad, "genero": colab.genero, "centro_costo": colab.centro_costo, "grupo_personal": colab.grupo_personal, "area_personal": colab.area_personal, "jefe_area": colab.jefe_area, "gerente_area": colab.gerente_area}})
+            resultados.append({
+                "cedula": colab.cedula, "found": True, 
+                "source": "headcount" if colab.estado_laboral=="ACTIVO" else "cesantes", 
+                "data": {
+                    "nombres": colab.nombres, "apellidos": colab.apellidos, "cargo": colab.cargo, 
+                    "unidad": colab.unidad, "area": colab.area, "localidad": colab.localidad, 
+                    "genero": colab.genero, "centro_costo": colab.centro_costo, 
+                    "grupo_personal": colab.grupo_personal, "area_personal": colab.area_personal, 
+                    "jefe_area": colab.jefe_inmediato, "gerente_area": colab.gerente_area
+                }
+            })
         else: resultados.append({"cedula": str(c), "found": False})
     return resultados
 
@@ -446,7 +460,7 @@ def exportar_evento(id: str, db: Session = Depends(get_db), current_admin: Usuar
             Colaborador.genero.label("GÉNERO"), Colaborador.cargo.label("CARGO"), Colaborador.unidad.label("UNIDAD"),
             Colaborador.area.label("ÁREA"), Colaborador.seccion.label("SECCIÓN"), Colaborador.centro_costo.label("CENTRO DE COSTO"),
             Colaborador.grupo_personal.label("GRUPO DE PERSONAL"), Colaborador.area_personal.label("ÁREA DE PERSONAL"),
-            Colaborador.jefe_area.label("JEFE DE ÁREA"), Colaborador.gerente_area.label("GERENTE DE AREA"), Colaborador.localidad.label("LOCALIDAD")
+            Colaborador.jefe_inmediato.label("JEFE DE ÁREA"), Colaborador.gerente_area.label("GERENTE DE AREA"), Colaborador.localidad.label("LOCALIDAD")
         ).join(Asistencia, Asistencia.evento_id == Evento.id).join(Colaborador, Colaborador.cedula == Asistencia.colaborador_cedula).filter(Evento.id == id)
 
         df = pd.read_sql(query.statement, engine)
@@ -496,7 +510,7 @@ def exportar_dashboard(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", 
             Colaborador.genero.label("GÉNERO"), Colaborador.cargo.label("CARGO"), Colaborador.unidad.label("UNIDAD"),
             Colaborador.area.label("ÁREA"), Colaborador.seccion.label("SECCIÓN"), Colaborador.centro_costo.label("CENTRO DE COSTO"),
             Colaborador.grupo_personal.label("GRUPO DE PERSONAL"), Colaborador.area_personal.label("ÁREA DE PERSONAL"),
-            Colaborador.jefe_area.label("JEFE DE ÁREA"), Colaborador.gerente_area.label("GERENTE DE AREA"), Colaborador.localidad.label("LOCALIDAD")
+            Colaborador.jefe_inmediato.label("JEFE DE ÁREA"), Colaborador.gerente_area.label("GERENTE DE AREA"), Colaborador.localidad.label("LOCALIDAD")
         ).join(Asistencia, Asistencia.evento_id == Evento.id).join(Colaborador, Colaborador.cedula == Asistencia.colaborador_cedula).filter(Evento.estado == "APROBADO")
 
         if vista == "ANUAL": query = query.filter(Evento.mes_anio.like(f"{mes.split('-')[0]}%"))
