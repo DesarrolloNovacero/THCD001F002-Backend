@@ -372,18 +372,26 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
     try:
         event_data = payload.get("eventData", {})
         registros = payload.get("registros", [])
-        evento_id = payload.get("eventoId")
+        # Aseguramos que el ID sea None si viene vacío
+        evento_id_raw = payload.get("eventoId")
+        evento_id = evento_id_raw if evento_id_raw and str(evento_id_raw).strip() != "" else None
+
         if not registros: raise HTTPException(status_code=400, detail="No hay asistentes")
+        
         try: horas = float(event_data.get("totalHoras", 0))
         except: horas = 0.0
+        
         inicio_dt = parse_iso_date(event_data.get("fechaHoraInicio"))
         cierre_dt = parse_iso_date(event_data.get("fechaHoraCierre"))
 
         if evento_id:
+            # BUSCAMOS EL EVENTO EXISTENTE PARA ACTUALIZARLO
             evento = db.query(Evento).filter(Evento.id == evento_id).first()
-            if not evento: raise HTTPException(status_code=404)
-            db.query(Asistencia).filter(Asistencia.evento_id == evento_id).delete()
+            if not evento: raise HTTPException(status_code=404, detail="El evento original no existe.")
+            # Limpiamos asistencias anteriores para re-insertar las nuevas
+            db.query(Asistencia).filter(Asistencia.evento_id == evento.id).delete()
         else:
+            # CREAMOS UN EVENTO NUEVO
             anio_act = datetime.utcnow().year
             prefijo = f"NOV-{anio_act}-"
             ultimo = db.query(Evento).filter(Evento.codigo_curso.like(f"{prefijo}%")).order_by(Evento.codigo_curso.desc()).first()
@@ -391,10 +399,21 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
             evento = Evento(codigo_curso=f"{prefijo}{str(nuevo_num).zfill(4)}", creado_por_usuario_id=current_user.id)
             db.add(evento)
 
-        evento.nombre_curso, evento.objetivo, evento.empresa, evento.facilitador = event_data.get("nombreCurso"), event_data.get("objetivo"), event_data.get("empresa"), event_data.get("facilitador")
-        evento.dimension_evento, evento.lugar, evento.modalidad, evento.fecha_hora_inicio = event_data.get("dimensionEvento"), event_data.get("lugar"), event_data.get("modalidad"), inicio_dt
-        evento.fecha_hora_cierre, evento.total_horas, evento.tipo_evento, evento.mes_anio = cierre_dt, horas, event_data.get("tipoEvento"), event_data.get("mesAnio")
+        # Actualizamos los campos (tanto para nuevo como para edición)
+        evento.nombre_curso = event_data.get("nombreCurso")
+        evento.objetivo = event_data.get("objetivo")
+        evento.empresa = event_data.get("empresa")
+        evento.facilitador = event_data.get("facilitador")
+        evento.dimension_evento = event_data.get("dimensionEvento")
+        evento.lugar = event_data.get("lugar")
+        evento.modalidad = event_data.get("modalidad")
+        evento.fecha_hora_inicio = inicio_dt
+        evento.fecha_hora_cierre = cierre_dt
+        evento.total_horas = horas
+        evento.tipo_evento = event_data.get("tipoEvento")
+        evento.mes_anio = event_data.get("mesAnio")
         evento.estado = "PENDIENTE"
+        
         db.flush()
 
         for r in registros:
@@ -407,11 +426,12 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
                 db.flush()
             db.add(Asistencia(evento_id=evento.id, colaborador_cedula=colab.cedula, estado_validacion="VALIDADO"))
 
-        db.add(HistorialEvento(evento_id=evento.id, usuario_id=current_user.id, accion="ENVIADO A REVISION"))
+        db.add(HistorialEvento(evento_id=evento.id, usuario_id=current_user.id, accion="ENVIADO A REVISION", comentario="Actualización de datos"))
         db.commit()
         return {"message": "ok", "evento_id": str(evento.id)}
     except Exception as e:
         db.rollback()
+        print(f"Error en enviar_revision: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/mis-eventos")
@@ -464,12 +484,26 @@ def exportar_evento(id: str, db: Session = Depends(get_db), current_admin: Usuar
         ).join(Asistencia, Asistencia.evento_id == Evento.id).join(Colaborador, Colaborador.cedula == Asistencia.colaborador_cedula).filter(Evento.id == id)
 
         df = pd.read_sql(query.statement, engine)
-        for col in ["FECHA INICIO", "FECHA CIERRE"]: df[col] = pd.to_datetime(df[col]).dt.strftime('%d/%m/%Y')
+        
+        # Formateo seguro de fechas para evitar errores en Excel
+        for col in ["FECHA INICIO", "FECHA CIERRE"]:
+            df[col] = pd.to_datetime(df[col]).dt.strftime('%d/%m/%Y').fillna('')
+            
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer: df.to_excel(writer, index=False, sheet_name='Reporte')
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Reporte')
+        
         output.seek(0)
-        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=auditoria_evento.xlsx"})
-    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+        
+        # Nombre de archivo seguro
+        return StreamingResponse(
+            output, 
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
+            headers={"Content-Disposition": f'attachment; filename="auditoria_evento.xlsx"'}
+        )
+    except Exception as e:
+        print(f"Error exportando: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/dashboard/metricas")
 def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
