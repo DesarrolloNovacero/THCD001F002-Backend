@@ -573,4 +573,4 @@ def revertir_aprobacion(id: str, db: Session = Depends(get_db), current_admin: U
         comentario="Aprobación revertida por el administrador"
     ))
     db.commit()
-    return {"status": "ok", "message": "El evento ha vuelto a estado pendiente"}
+    return {"status": "ok", "message": "El evento ha vuelto a estado pendiente"} #verga
