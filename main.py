@@ -282,6 +282,7 @@ async def upload_masters(file: UploadFile = File(...), mes_corte: str = Form(...
                 if kw in col: return col
         return None
 
+    # Mapeo ajustado a los encabezados provistos
     col_cedula = find_col(["IDENTIFICACIÓN NACIONAL", "CEDULA", "IDENTIFICACION"])
     col_apellidos = find_col(["APELLIDOS"])
     col_nombres = find_col(["NOMBRES"])
@@ -300,7 +301,9 @@ async def upload_masters(file: UploadFile = File(...), mes_corte: str = Form(...
         col_ji = find_col(["JEFE INMEDIATO"])
         
     col_ga = find_col(["GERENTE DE AREA"])
-    col_loc = find_col(["LOCACIÓN NOMBRE", "LOCALIDAD", "LOCACION"])
+    
+    # IMPORTANTE: Coincidencia con "Locación  Nombre" (dos espacios)
+    col_loc = find_col(["LOCACIÓN  NOMBRE", "LOCACIÓN NOMBRE", "LOCALIDAD", "LOCACION"])
     col_desv = find_col(["FECHA DE DESVINCULACIÓN", "DESVINCULACION"])
 
     conteo_activos = 0
@@ -330,7 +333,10 @@ async def upload_masters(file: UploadFile = File(...), mes_corte: str = Form(...
         colaborador.area_personal = str(row[col_ap]).strip() if col_ap else ""
         colaborador.jefe_inmediato = str(row[col_ji]).strip() if col_ji else ""
         colaborador.gerente_area = str(row[col_ga]).strip() if col_ga else ""
-        colaborador.localidad = str(row[col_loc]).strip() if col_loc else ""
+        
+        # ASIGNACIÓN DE LOCALIDAD
+        colaborador.localidad = str(row[col_loc]).strip().upper() if col_loc else ""
+        
         colaborador.origen = "maestro"
         colaborador.estado_laboral = estado_final
         
@@ -372,7 +378,6 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
     try:
         event_data = payload.get("eventData", {})
         registros = payload.get("registros", [])
-        # Aseguramos que el ID sea None si viene vacío
         evento_id_raw = payload.get("eventoId")
         evento_id = evento_id_raw if evento_id_raw and str(evento_id_raw).strip() != "" else None
 
@@ -385,13 +390,10 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
         cierre_dt = parse_iso_date(event_data.get("fechaHoraCierre"))
 
         if evento_id:
-            # BUSCAMOS EL EVENTO EXISTENTE PARA ACTUALIZARLO
             evento = db.query(Evento).filter(Evento.id == evento_id).first()
             if not evento: raise HTTPException(status_code=404, detail="El evento original no existe.")
-            # Limpiamos asistencias anteriores para re-insertar las nuevas
             db.query(Asistencia).filter(Asistencia.evento_id == evento.id).delete()
         else:
-            # CREAMOS UN EVENTO NUEVO
             anio_act = datetime.utcnow().year
             prefijo = f"NOV-{anio_act}-"
             ultimo = db.query(Evento).filter(Evento.codigo_curso.like(f"{prefijo}%")).order_by(Evento.codigo_curso.desc()).first()
@@ -399,7 +401,6 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
             evento = Evento(codigo_curso=f"{prefijo}{str(nuevo_num).zfill(4)}", creado_por_usuario_id=current_user.id)
             db.add(evento)
 
-        # Actualizamos los campos (tanto para nuevo como para edición)
         evento.nombre_curso = event_data.get("nombreCurso")
         evento.objetivo = event_data.get("objetivo")
         evento.empresa = event_data.get("empresa")
@@ -485,7 +486,6 @@ def exportar_evento(id: str, db: Session = Depends(get_db), current_admin: Usuar
 
         df = pd.read_sql(query.statement, engine)
         
-        # Formateo seguro de fechas para evitar errores en Excel
         for col in ["FECHA INICIO", "FECHA CIERRE"]:
             df[col] = pd.to_datetime(df[col]).dt.strftime('%d/%m/%Y').fillna('')
             
@@ -495,7 +495,6 @@ def exportar_evento(id: str, db: Session = Depends(get_db), current_admin: Usuar
         
         output.seek(0)
         
-        # Nombre de archivo seguro
         return StreamingResponse(
             output, 
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", 
@@ -573,4 +572,4 @@ def revertir_aprobacion(id: str, db: Session = Depends(get_db), current_admin: U
         comentario="Aprobación revertida por el administrador"
     ))
     db.commit()
-    return {"status": "ok", "message": "El evento ha vuelto a estado pendiente"} #verga
+    return {"status": "ok", "message": "El evento ha vuelto a estado pendiente"}
