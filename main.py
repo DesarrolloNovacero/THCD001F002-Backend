@@ -524,3 +524,19 @@ def exportar_dashboard(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", 
         output.seek(0)
         return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=dashboard_completo.xlsx"})
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/admin/eventos/{id}/revertir")
+def revertir_aprobacion(id: str, db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
+    evento = db.query(Evento).filter(Evento.id == id).first()
+    if not evento:
+        raise HTTPException(status_code=404, detail="Evento no encontrado")
+    
+    evento.estado = "PENDIENTE"
+    db.add(HistorialEvento(
+        evento_id=evento.id, 
+        usuario_id=current_admin.id, 
+        accion="REVERTIDO A PENDIENTE",
+        comentario="Aprobación revertida por el administrador"
+    ))
+    db.commit()
+    return {"status": "ok", "message": "El evento ha vuelto a estado pendiente"}
