@@ -169,33 +169,10 @@ def parse_iso_date(date_str):
         return dt.replace(tzinfo=None).to_pydatetime() if not pd.isna(dt) else None
     except: return None
 
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=15))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("sub")
-        if email is None: raise HTTPException(status_code=401)
-    except JWTError: raise HTTPException(status_code=401)
-    user = db.query(Usuario).filter(Usuario.email == email).first()
-    if not user or not user.activo: raise HTTPException(status_code=401)
-    return user
-
-def get_current_admin(current_user: Usuario = Depends(get_current_user)):
-    if current_user.rol != "ADMIN": raise HTTPException(status_code=403)
-    return current_user
-
 @app.post("/token")
 def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(Usuario).filter(Usuario.email == form_data.username).first()
-    if not user or not verify_password(form_data.password, user.password_hash):
+    if not user or not pwd_context.verify(form_data.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Credenciales incorrectas")
     token = create_access_token(data={"sub": user.email}, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     return {"access_token": token, "token_type": "bearer", "user_name": user.nombre_completo, "user_role": user.rol, "user_location": user.localidad}
@@ -238,7 +215,10 @@ def eliminar_empresa(empresa_id: str, current_admin: Usuario = Depends(get_curre
 def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
     try:
         def get_data(period_mes, period_vista):
-            y = int(period_mes.split('-')[0])
+            try:
+                y = int(period_mes.split('-')[0])
+            except:
+                y = datetime.utcnow().year
             q = db.query(Evento.total_horas, Evento.nombre_curso, Evento.modalidad, Evento.dimension_evento, Colaborador.genero, Colaborador.unidad, Colaborador.localidad, Colaborador.grupo_personal, Colaborador.cedula).join(Asistencia, Asistencia.evento_id == Evento.id).join(Colaborador, Colaborador.cedula == Asistencia.colaborador_cedula).filter(Evento.estado == "APROBADO")
             if period_vista == "ANUAL": q = q.filter(Evento.mes_anio.like(f"{y}%"))
             else: q = q.filter(Evento.mes_anio == period_mes)
@@ -252,10 +232,15 @@ def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", db
 
         cur_rows, cur_h, cur_c, cur_p = get_data(mes, vista)
         
-        y, m = map(int, mes.split('-'))
-        if vista == "ANUAL": prev_mes = f"{y-1}-01"
-        else: prev_mes = f"{y-1}-12" if m == 1 else f"{y}-{m-1:02d}"
-        
+        try:
+            parts = mes.split('-')
+            y = int(parts[0])
+            m = int(parts[1]) if len(parts) > 1 else 1
+            if vista == "ANUAL": prev_mes = f"{y-1}-01"
+            else: prev_mes = f"{y-1}-12" if m == 1 else f"{y}-{m-1:02d}"
+        except:
+            prev_mes = mes
+
         _, pre_h, _, pre_p = get_data(prev_mes, vista)
 
         mod_dic, gen_dic, uni_dic, loc_dic, d_g, n_u = {}, {}, {}, {}, {}, set()
@@ -275,6 +260,32 @@ def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", db
             "graficos": {"modalidad": [{"name": k, "value": v} for k, v in mod_dic.items()], "genero": [{"name": k, "value": v} for k, v in gen_dic.items()], "unidad_negocio": [{"name": k, "value": v} for k, v in uni_dic.items()], "localidad": [{"name": k, "value": v} for k, v in loc_dic.items()], "dimension_grupo": [{"dimension": d, **grps} for d, grps in d_g.items()]}
         }
     except Exception as e: raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/admin/eventos/{id}/exportar")
+def exportar_evento_individual(id: str, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+    try:
+        evento = db.query(Evento).filter(Evento.id == id).first()
+        if not evento: raise HTTPException(status_code=404, detail="Evento no encontrado")
+        query = db.query(
+            Evento.codigo_curso.label("CÓDIGO"), Evento.nombre_curso.label("NOMBRE DEL CURSO"), Evento.objetivo.label("OBJETIVO"),
+            Evento.empresa.label("EMPRESA CAPACITADORA"), Evento.facilitador.label("FACILITADOR"), Evento.dimension_evento.label("DIMENSIÓN DE EVENTO"),
+            Evento.lugar.label("LUGAR DONDE SE DIO LA CAPACITACION"), Evento.modalidad.label("MODALIDAD"),
+            Evento.fecha_hora_inicio.label("FECHA INICIO"), Evento.fecha_hora_cierre.label("FECHA CIERRE"),
+            Evento.total_horas.label("DURACION DE LA CAPACITACION (HORAS)"), Evento.tipo_evento.label("TIPO EVENTO"),
+            Evento.mes_anio.label("MES-AÑO"), Colaborador.cedula.label("CÉDULA"),
+            (Colaborador.apellidos + " " + Colaborador.nombres).label("APELLIDOS Y NOMBRE DEL COLABORADOR"),
+            Colaborador.genero.label("GÉNERO"), Colaborador.cargo.label("CARGO"), Colaborador.unidad.label("UNIDAD"),
+            Colaborador.area.label("ÁREA"), Colaborador.seccion.label("SECCIÓN"), Colaborador.centro_costo.label("CENTRO DE COSTO"),
+            Colaborador.grupo_personal.label("GRUPO DE PERSONAL"), Colaborador.area_personal.label("ÁREA DE PERSONAL"),
+            Colaborador.jefe_inmediato.label("JEFE DE ÁREA"), Colaborador.gerente_area.label("GERENTE DE AREA"), Colaborador.localidad.label("LOCALIDAD")
+        ).join(Asistencia, Asistencia.evento_id == Evento.id).join(Colaborador, Colaborador.cedula == Asistencia.colaborador_cedula).filter(Evento.id == id)
+        df = pd.read_sql(query.statement, engine)
+        for col in ["FECHA INICIO", "FECHA CIERRE"]: df[col] = pd.to_datetime(df[col]).dt.strftime('%d/%m/%Y').fillna('')
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer: df.to_excel(writer, index=False, sheet_name='Detalle')
+        output.seek(0)
+        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=evento_{evento.codigo_curso}.xlsx"})
+    except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/dashboard/exportar")
 def exportar_dashboard(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
@@ -318,3 +329,32 @@ def revertir_aprobacion(id: str, db: Session = Depends(get_db), current_admin: U
     db.add(HistorialEvento(evento_id=evento.id, usuario_id=current_admin.id, accion="REVERTIDO A PENDIENTE"))
     db.commit()
     return {"status": "ok"}
+
+# Endpoints auxiliares necesarios
+@app.get("/check-db-status")
+def check_db_status(db: Session = Depends(get_db)):
+    c = db.query(Colaborador).count()
+    return {"ready": c > 0, "count": c}
+
+@app.get("/load-state")
+def load_state(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
+    return json.loads(sesion.estado_borrador_json) if sesion and sesion.estado_borrador_json else None
+
+@app.post("/save-state")
+def save_state(payload: dict = Body(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
+    if not sesion:
+        sesion = SesionWeb(usuario_id=current_user.id, token_sesion=f"draft_{current_user.id}", estado_borrador_json=json.dumps(payload), expira_en=datetime.utcnow()+timedelta(days=7))
+        db.add(sesion)
+    else:
+        sesion.estado_borrador_json = json.dumps(payload)
+        sesion.ultima_modificacion = datetime.utcnow()
+    db.commit()
+    return {"status": "ok"}
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
