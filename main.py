@@ -169,6 +169,12 @@ def parse_iso_date(date_str):
         return dt.replace(tzinfo=None).to_pydatetime() if not pd.isna(dt) else None
     except: return None
 
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
 @app.post("/token")
 def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(Usuario).filter(Usuario.email == form_data.username).first()
@@ -214,34 +220,30 @@ def eliminar_empresa(empresa_id: str, current_admin: Usuario = Depends(get_curre
 @app.get("/dashboard/metricas")
 def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
     try:
-        def get_data(period_mes, period_vista):
-            try:
-                y = int(period_mes.split('-')[0])
-            except:
-                y = datetime.utcnow().year
+        def get_period_data(p_mes, p_vista):
+            try: y = int(p_mes.split('-')[0])
+            except: y = datetime.utcnow().year
             q = db.query(Evento.total_horas, Evento.nombre_curso, Evento.modalidad, Evento.dimension_evento, Colaborador.genero, Colaborador.unidad, Colaborador.localidad, Colaborador.grupo_personal, Colaborador.cedula).join(Asistencia, Asistencia.evento_id == Evento.id).join(Colaborador, Colaborador.cedula == Asistencia.colaborador_cedula).filter(Evento.estado == "APROBADO")
-            if period_vista == "ANUAL": q = q.filter(Evento.mes_anio.like(f"{y}%"))
-            else: q = q.filter(Evento.mes_anio == period_mes)
+            if p_vista == "ANUAL": q = q.filter(Evento.mes_anio.like(f"{y}%"))
+            else: q = q.filter(Evento.mes_anio == p_mes)
             if estado != "TODOS": q = q.filter(Colaborador.estado_laboral == estado)
             rows = q.all()
-            act = db.query(func.avg(MetricaMensual.total_activos)).filter(MetricaMensual.mes_anio == period_mes).scalar() or 1
+            act = db.query(func.avg(MetricaMensual.total_activos)).filter(MetricaMensual.mes_anio == p_mes).scalar() or 1
             h = sum(float(r.total_horas or 0) for r in rows)
             c = len(set(r.cedula for r in rows))
             p = round((c/act)*100, 1) if act > 0 else 0
             return rows, h, c, p
 
-        cur_rows, cur_h, cur_c, cur_p = get_data(mes, vista)
-        
+        cur_rows, cur_h, cur_c, cur_p = get_period_data(mes, vista)
         try:
             parts = mes.split('-')
             y = int(parts[0])
             m = int(parts[1]) if len(parts) > 1 else 1
             if vista == "ANUAL": prev_mes = f"{y-1}-01"
             else: prev_mes = f"{y-1}-12" if m == 1 else f"{y}-{m-1:02d}"
-        except:
-            prev_mes = mes
+        except: prev_mes = mes
 
-        _, pre_h, _, pre_p = get_data(prev_mes, vista)
+        _, pre_h, _, pre_p = get_period_data(prev_mes, vista)
 
         mod_dic, gen_dic, uni_dic, loc_dic, d_g, n_u = {}, {}, {}, {}, {}, set()
         for r in cur_rows:
@@ -265,7 +267,7 @@ def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", db
 def exportar_evento_individual(id: str, db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
     try:
         evento = db.query(Evento).filter(Evento.id == id).first()
-        if not evento: raise HTTPException(status_code=404, detail="Evento no encontrado")
+        if not evento: raise HTTPException(status_code=404)
         query = db.query(
             Evento.codigo_curso.label("CÓDIGO"), Evento.nombre_curso.label("NOMBRE DEL CURSO"), Evento.objetivo.label("OBJETIVO"),
             Evento.empresa.label("EMPRESA CAPACITADORA"), Evento.facilitador.label("FACILITADOR"), Evento.dimension_evento.label("DIMENSIÓN DE EVENTO"),
@@ -282,9 +284,9 @@ def exportar_evento_individual(id: str, db: Session = Depends(get_db), current_u
         df = pd.read_sql(query.statement, engine)
         for col in ["FECHA INICIO", "FECHA CIERRE"]: df[col] = pd.to_datetime(df[col]).dt.strftime('%d/%m/%Y').fillna('')
         output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer: df.to_excel(writer, index=False, sheet_name='Detalle')
+        with pd.ExcelWriter(output, engine='openpyxl') as writer: df.to_excel(writer, index=False, sheet_name='Reporte')
         output.seek(0)
-        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=evento_{evento.codigo_curso}.xlsx"})
+        return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=auditoria_{evento.codigo_curso}.xlsx"})
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/dashboard/exportar")
@@ -312,6 +314,15 @@ def exportar_dashboard(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", 
         return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f"attachment; filename=reporte_dashboard.xlsx"})
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/mis-eventos")
+def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    evs = db.query(Evento).filter(Evento.creado_por_usuario_id == current_user.id).order_by(Evento.fecha_creacion.desc()).all()
+    res = []
+    for e in evs:
+        hist = db.query(HistorialEvento).filter(HistorialEvento.evento_id == e.id).order_by(HistorialEvento.fecha_registro.desc()).first()
+        res.append({"id": str(e.id), "codigo": e.codigo_curso, "nombre": e.nombre_curso, "estado": e.estado, "fecha": e.fecha_creacion, "comentario": hist.comentario if hist else ""})
+    return res
+
 @app.get("/admin/eventos")
 def admin_eventos(db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
     evs = db.query(Evento).order_by(Evento.fecha_creacion.desc()).all()
@@ -330,7 +341,6 @@ def revertir_aprobacion(id: str, db: Session = Depends(get_db), current_admin: U
     db.commit()
     return {"status": "ok"}
 
-# Endpoints auxiliares necesarios
 @app.get("/check-db-status")
 def check_db_status(db: Session = Depends(get_db)):
     c = db.query(Colaborador).count()
@@ -352,9 +362,3 @@ def save_state(payload: dict = Body(...), current_user: Usuario = Depends(get_cu
         sesion.ultima_modificacion = datetime.utcnow()
     db.commit()
     return {"status": "ok"}
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta if expires_delta else timedelta(minutes=15))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
