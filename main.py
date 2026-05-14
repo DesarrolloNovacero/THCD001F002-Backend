@@ -18,15 +18,13 @@ from passlib.context import CryptContext
 import pandas as pd
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://neondb_owner:npg_cz5oNRL7Snwj@ep-wild-tooth-an30z9iu.c-6.us-east-1.aws.neon.tech/neondb?sslmode=require")
-
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
 SECRET_KEY = os.getenv("SECRET_KEY", "CLAVE_ULTRA_SECRETA_TRAINFORM")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480 
 
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
@@ -127,13 +125,6 @@ def get_db():
     try: yield db
     finally: db.close()
 
-def parse_iso_date(date_str):
-    if not date_str: return None
-    try:
-        dt = pd.to_datetime(date_str)
-        return dt.replace(tzinfo=None).to_pydatetime() if not pd.isna(dt) else None
-    except: return None
-
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
@@ -157,6 +148,13 @@ def get_current_admin(current_user: Usuario = Depends(get_current_user)):
     if current_user.rol != "ADMIN": raise HTTPException(status_code=403)
     return current_user
 
+def parse_iso_date(date_str):
+    if not date_str: return None
+    try:
+        dt = pd.to_datetime(date_str)
+        return dt.replace(tzinfo=None).to_pydatetime() if not pd.isna(dt) else None
+    except: return None
+
 Base.metadata.create_all(bind=engine)
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -165,9 +163,44 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = db.query(Usuario).filter(Usuario.email == form_data.username).first()
     if not user or not verify_password(form_data.password, user.password_hash):
-        raise HTTPException(status_code=401, detail="Credenciales incorrectas")
+        raise HTTPException(status_code=401, detail="Error")
     token = create_access_token(data={"sub": user.email}, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     return {"access_token": token, "token_type": "bearer", "user_name": user.nombre_completo, "user_role": user.rol, "user_location": user.localidad}
+
+@app.get("/usuarios")
+def listar_usuarios(db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
+    users = db.query(Usuario).all()
+    return [{"id": str(u.id), "email": u.email, "nombre_completo": u.nombre_completo, "rol": u.rol, "activo": u.activo, "localidad": u.localidad} for u in users]
+
+@app.post("/crear-usuario")
+def crear_usuario(data: NuevoUsuario, db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
+    if db.query(Usuario).filter(Usuario.email == data.email).first(): raise HTTPException(status_code=400)
+    db.add(Usuario(email=data.email, password_hash=pwd_context.hash(data.password), nombre_completo=data.nombre_completo, rol=data.rol, localidad=data.localidad))
+    db.commit(); return {"message": "ok"}
+
+@app.delete("/usuarios/{user_id}")
+def eliminar_usuario(user_id: str, db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
+    u = db.query(Usuario).filter(Usuario.id == user_id).first()
+    if u: db.delete(u); db.commit()
+    return {"message": "ok"}
+
+@app.get("/check-db-status")
+def check_db_status(db: Session = Depends(get_db)):
+    return {"ready": db.query(Colaborador).count() > 0}
+
+@app.get("/load-state")
+def load_state(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
+    return json.loads(sesion.estado_borrador_json) if sesion else None
+
+@app.post("/save-state")
+def save_state(payload: dict = Body(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
+    if not sesion:
+        sesion = SesionWeb(usuario_id=current_user.id, token_sesion=f"draft_{current_user.id}", estado_borrador_json=json.dumps(payload), expira_en=datetime.utcnow()+timedelta(days=7))
+        db.add(sesion)
+    else: sesion.estado_borrador_json = json.dumps(payload); sesion.ultima_modificacion = datetime.utcnow()
+    db.commit(); return {"status": "ok"}
 
 @app.get("/nombres-cursos")
 def listar_nombres_cursos(db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
@@ -175,8 +208,6 @@ def listar_nombres_cursos(db: Session = Depends(get_db), current_user: Usuario =
 
 @app.post("/nombres-cursos")
 def crear_nombre_curso(data: NuevoNombreCurso, db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
-    existe = db.query(NombreCurso).filter(NombreCurso.nombre.ilike(data.nombre)).first()
-    if existe: raise HTTPException(status_code=400, detail="Ya existe")
     db.add(NombreCurso(nombre=data.nombre.upper().strip()))
     db.commit(); return {"message": "ok"}
 
@@ -200,6 +231,64 @@ def eliminar_empresa(empresa_id: str, current_admin: Usuario = Depends(get_curre
     emp = db.query(EmpresaCapacitadora).filter(EmpresaCapacitadora.id == empresa_id).first()
     if emp: db.delete(emp); db.commit()
     return {"message": "ok"}
+
+@app.post("/suggest-cedulas")
+def suggest_cedulas(search_term: str = Form(...), db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+    search = f"%{search_term.strip()}%"
+    res = db.query(Colaborador).filter(or_(Colaborador.cedula.ilike(search), Colaborador.nombres.ilike(search), Colaborador.apellidos.ilike(search))).limit(10).all()
+    return [{"cedula": r.cedula, "nombre": f"{r.apellidos} {r.nombres}".strip(), "source": "headcount" if r.estado_laboral=="ACTIVO" else "cesantes"} for r in res]
+
+@app.post("/validate-cedula")
+def validate_cedula(cedulas_json: str = Form(...), db: Session = Depends(get_db), current_user: Usuario = Depends(get_current_user)):
+    cedulas = json.loads(cedulas_json)
+    resultados = []
+    for c in cedulas:
+        colab = db.query(Colaborador).filter(Colaborador.cedula == str(c).strip()).first()
+        if colab:
+            resultados.append({"cedula": colab.cedula, "found": True, "data": {"nombres": colab.nombres, "apellidos": colab.apellidos, "cargo": colab.cargo, "unidad": colab.unidad, "area": colab.area, "localidad": colab.localidad, "genero": colab.genero, "centro_costo": colab.centro_costo, "grupo_personal": colab.grupo_personal, "area_personal": colab.area_personal, "jefe_area": colab.jefe_inmediato, "gerente_area": colab.gerente_area, "estado_laboral": colab.estado_laboral}})
+        else: resultados.append({"cedula": str(c), "found": False})
+    return resultados
+
+@app.post("/enviar-revision")
+def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        event_data = payload.get("eventData", {}); registros = payload.get("registros", [])
+        evento_id_raw = payload.get("eventoId")
+        evento_id = evento_id_raw if evento_id_raw and str(evento_id_raw).strip() != "" else None
+        try: horas = float(event_data.get("totalHoras", 0))
+        except: horas = 0.0
+        inicio_dt = parse_iso_date(event_data.get("fechaHoraInicio"))
+        cierre_dt = parse_iso_date(event_data.get("fechaHoraCierre"))
+        if evento_id:
+            evento = db.query(Evento).filter(Evento.id == evento_id).first()
+            if not evento: raise HTTPException(status_code=404)
+            db.query(Asistencia).filter(Asistencia.evento_id == evento.id).delete()
+        else:
+            anio_act = datetime.utcnow().year; prefijo = f"NOV-{anio_act}-"
+            ultimo = db.query(Evento).filter(Evento.codigo_curso.like(f"{prefijo}%")).order_by(Evento.codigo_curso.desc()).first()
+            nuevo_num = (int(ultimo.codigo_curso.split('-')[-1]) + 1) if ultimo else 1
+            evento = Evento(codigo_curso=f"{prefijo}{str(nuevo_num).zfill(4)}", creado_por_usuario_id=current_user.id)
+            db.add(evento)
+        evento.nombre_curso, evento.objetivo, evento.empresa, evento.facilitador = event_data.get("nombreCurso"), event_data.get("objetivo"), event_data.get("empresa"), event_data.get("facilitador")
+        evento.dimension_evento, evento.lugar, evento.modalidad = event_data.get("dimensionEvento"), event_data.get("lugar"), event_data.get("modalidad")
+        evento.fecha_hora_inicio, evento.fecha_hora_cierre, evento.total_horas, evento.tipo_evento, evento.mes_anio = inicio_dt, cierre_dt, horas, event_data.get("tipoEvento"), event_data.get("mesAnio")
+        evento.estado = "PENDIENTE"; db.flush()
+        for r in registros:
+            cedula_raw = str(r.get("CÉDULA") or r.get("cedula") or "").strip()
+            if not cedula_raw: continue
+            colab = db.query(Colaborador).filter(Colaborador.cedula == cedula_raw).first()
+            if not colab:
+                colab = Colaborador(cedula=cedula_raw, nombres=str(r.get("APELLIDOS Y NOMBRE DEL COLABORADOR", "M")), origen="auto", estado_laboral="ACTIVO")
+                db.add(colab); db.flush()
+            db.add(Asistencia(evento_id=evento.id, colaborador_cedula=colab.cedula, estado_validacion="VALIDADO"))
+        db.add(HistorialEvento(evento_id=evento.id, usuario_id=current_user.id, accion="ENVIADO A REVISION", comentario="Actualización"))
+        db.commit(); return {"message": "ok", "evento_id": str(evento.id)}
+    except Exception as e: db.rollback(); raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/mis-eventos")
+def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
+    evs = db.query(Evento).filter(Evento.creado_por_usuario_id == current_user.id).order_by(Evento.fecha_creacion.desc()).all()
+    return [{"id": str(e.id), "codigo": e.codigo_curso, "nombre": e.nombre_curso, "estado": e.estado, "fecha": e.fecha_creacion} for e in evs]
 
 @app.get("/dashboard/metricas")
 def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
@@ -279,29 +368,6 @@ def exportar_dashboard(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", 
         with pd.ExcelWriter(output, engine='openpyxl') as writer: df.to_excel(writer, index=False)
         output.seek(0); return StreamingResponse(output, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": "attachment; filename=reporte.xlsx"})
     except Exception: raise HTTPException(status_code=500)
-
-@app.get("/check-db-status")
-def check_db_status(db: Session = Depends(get_db)):
-    return {"ready": db.query(Colaborador).count() > 0}
-
-@app.get("/load-state")
-def load_state(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
-    return json.loads(sesion.estado_borrador_json) if sesion else None
-
-@app.post("/save-state")
-def save_state(payload: dict = Body(...), current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    sesion = db.query(SesionWeb).filter(SesionWeb.usuario_id == current_user.id).first()
-    if not sesion:
-        sesion = SesionWeb(usuario_id=current_user.id, token_sesion=f"draft_{current_user.id}", estado_borrador_json=json.dumps(payload), expira_en=datetime.utcnow()+timedelta(days=7))
-        db.add(sesion)
-    else: sesion.estado_borrador_json = json.dumps(payload); sesion.ultima_modificacion = datetime.utcnow()
-    db.commit(); return {"status": "ok"}
-
-@app.get("/mis-eventos")
-def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
-    evs = db.query(Evento).filter(Evento.creado_por_usuario_id == current_user.id).all()
-    return [{"id": str(e.id), "codigo": e.codigo_curso, "nombre": e.nombre_curso, "estado": e.estado, "fecha": e.fecha_creacion} for e in evs]
 
 @app.get("/admin/eventos")
 def admin_eventos(db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
