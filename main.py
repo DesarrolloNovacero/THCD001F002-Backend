@@ -2,6 +2,7 @@ import os
 import json
 import io
 import unicodedata
+import random
 from datetime import datetime, timedelta
 from typing import Optional, List
 from pydantic import BaseModel
@@ -118,6 +119,8 @@ class NuevoUsuario(BaseModel): email: str; password: str; nombre_completo: str; 
 class NuevaEmpresa(BaseModel): nombre: str
 class NuevoNombreCurso(BaseModel): nombre: str
 class UpdatePasswordModel(BaseModel): password: str
+class ForgotPasswordModel(BaseModel): email: str
+class ResetPasswordModel(BaseModel): email: str; code: str; new_password: str
 class AuditoriaAccion(BaseModel): comentario: str
 
 def get_db():
@@ -157,6 +160,7 @@ def parse_iso_date(date_str):
 
 Base.metadata.create_all(bind=engine)
 app = FastAPI()
+password_reset_tokens = {}
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.post("/token")
@@ -166,6 +170,43 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
         raise HTTPException(status_code=401, detail="Error")
     token = create_access_token(data={"sub": user.email}, expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     return {"access_token": token, "token_type": "bearer", "user_name": user.nombre_completo, "user_role": user.rol, "user_location": user.localidad}
+
+@app.post("/forgot-password")
+def forgot_password(data: ForgotPasswordModel, db: Session = Depends(get_db)):
+    user = db.query(Usuario).filter(Usuario.email == data.email).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    code = str(random.randint(100000, 999999))
+
+    password_reset_tokens[data.email] = {
+        "code": code,
+        "expires": datetime.utcnow() + timedelta(minutes=10)
+    }
+
+    # por ahora lo devolvemos (luego se manda por email)
+    return {
+        "message": "Código generado",
+        "debug_code": code
+    }
+
+@app.post("/reset-password")
+def reset_password(data: ResetPasswordModel, db: Session = Depends(get_db)):
+    record = password_reset_tokens.get(data.email)
+    if not record:
+        raise HTTPException(status_code=400, detail="No hay solicitud de recuperación")
+    if record["expires"] < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Código expirado")
+    if record["code"] != data.code:
+        raise HTTPException(status_code=400, detail="Código incorrecto")
+    user = db.query(Usuario).filter(Usuario.email == data.email).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    user.password_hash = pwd_context.hash(data.new_password)
+    db.commit()
+    del password_reset_tokens[data.email]
+    return {"message": "Contraseña actualizada correctamente"}
 
 @app.get("/usuarios")
 def listar_usuarios(db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
