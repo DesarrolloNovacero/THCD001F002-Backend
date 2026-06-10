@@ -31,7 +31,7 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 class Usuario(Base):
     __tablename__ = "usuarios"
     id = Column(UUID(as_uuid=True), primary_key=True, server_default=sqlalchemy.text("gen_random_uuid()"))
-    email = Column(String(100), unique=False, nullable=False)
+    email = Column(String(100), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     nombre_completo = Column(String(100), nullable=False)
     rol = Column(String(50), nullable=False)
