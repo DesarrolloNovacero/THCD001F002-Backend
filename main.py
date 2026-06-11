@@ -307,6 +307,58 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
         db.commit(); return {"message": "ok", "evento_id": str(evento.id)}
     except Exception as e: db.rollback(); raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/upload-masters")
+def upload_masters(
+    file: UploadFile = File(...),
+    mes_corte: str = Form(...),
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_admin)
+):
+    try:
+        contents = file.file.read()
+        df = pd.read_excel(io.BytesIO(contents))
+
+        #limpiar columnas
+        df.columns = [c.strip() for c in df.columns]
+
+        count = 0
+
+        for _, row in df.iterrows():
+            cedula = str(
+                row.get("CÉDULA") or
+                row.get("Identificación Nacional") or
+                ""
+            ).strip()
+
+            if not cedula:
+                continue
+
+            fecha_desv = str(row.get("Fecha de desvinculación", "")).strip()
+            estado = "CESANTE" if fecha_desv else "ACTIVO"
+
+            colab = db.query(Colaborador).filter(Colaborador.cedula == cedula).first()
+
+            if not colab:
+                colab = Colaborador(
+                    cedula=cedula,
+                    nombres=str(row.get("Nombres", "")),
+                    apellidos=str(row.get("Apellidos", "")),
+                    estado_laboral=estado,
+                    origen="upload"
+                )
+                db.add(colab)
+            else:
+                colab.estado_laboral = estado
+
+            count += 1
+
+        db.commit()
+
+        return {"status": "ok", "count": count}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))    
+
 @app.get("/mis-eventos")
 def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     evs = db.query(Evento).filter(Evento.creado_por_usuario_id == current_user.id).order_by(Evento.fecha_creacion.desc()).all()
