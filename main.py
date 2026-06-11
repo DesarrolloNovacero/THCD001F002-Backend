@@ -316,19 +316,23 @@ def upload_masters(
 ):
     try:
         contents = file.file.read()
+
         df = pd.read_excel(io.BytesIO(contents))
 
-        #limpiar columnas
-        df.columns = [c.strip() for c in df.columns]
+        df.columns = [str(c).strip() for c in df.columns]
+
+        df = df.rename(columns={
+            "ECUADOR CÉDULA DE IDENTIFICACIÓN Identificación Nacional": "Identificación Nacional"
+        })
 
         count = 0
 
         for _, row in df.iterrows():
-            cedula = str(
-                row.get("CÉDULA") or
-                row.get("Identificación Nacional") or
-                ""
-            ).strip()
+
+            cedula = str(row.get("Identificación Nacional", "")).strip()
+
+            if cedula.endswith(".0"):
+                cedula = cedula.split(".")[0]
 
             if not cedula:
                 continue
@@ -338,26 +342,41 @@ def upload_masters(
 
             colab = db.query(Colaborador).filter(Colaborador.cedula == cedula).first()
 
+            data_map = {
+                "cedula": cedula,
+                "apellidos": str(row.get("Apellidos", "")),
+                "nombres": str(row.get("Nombres", "")),
+                "cargo": str(row.get("Cargo Nombre del puesto", "")),
+                "genero": str(row.get("Sexo", "")),
+                "unidad": str(row.get("Unidad de negocio Nombre", "")),
+                "area": str(row.get("Área Nombre", "")),
+                "seccion": str(row.get("Sección Nombre", "")),
+                "centro_costo": str(row.get("Centro de costo Nombre", "")),
+                "grupo_personal": str(row.get("Grupo de Personal", "")),
+                "area_personal": str(row.get("Área de Personal", "")),
+                "jefe_inmediato": str(row.get("Jefe Inmediato", "")),
+                "gerente_area": str(row.get("GERENTE DE AREA  Relaciones Laborales Nombre", "")),
+                "localidad": str(row.get("Locación  Nombre", "")),
+                "estado_laboral": estado,
+                "origen": "upload"
+            }
+
             if not colab:
-                colab = Colaborador(
-                    cedula=cedula,
-                    nombres=str(row.get("Nombres", "")),
-                    apellidos=str(row.get("Apellidos", "")),
-                    estado_laboral=estado,
-                    origen="upload"
-                )
+                colab = Colaborador(**data_map)
                 db.add(colab)
             else:
-                colab.estado_laboral = estado
+                for key, value in data_map.items():
+                    setattr(colab, key, value)
 
             count += 1
 
         db.commit()
 
-        return {"status": "ok", "count": count}
+        return {"status": "ok", "procesados": count}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))    
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/mis-eventos")
 def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
