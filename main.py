@@ -184,6 +184,7 @@ def eliminar_usuario(user_id: str, db: Session = Depends(get_db), current_admin:
     if u: db.delete(u); db.commit()
     return {"message": "ok"}
 
+
 @app.put("/usuarios/{user_id}/password")
 def cambiar_password(
     user_id: str,
@@ -203,6 +204,7 @@ def cambiar_password(
     db.commit()
 
     return {"message": "Contraseña actualizada correctamente"}
+
 
 @app.get("/check-db-status")
 def check_db_status(db: Session = Depends(get_db)):
