@@ -466,9 +466,28 @@ def exportar_dashboard(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", 
 def admin_eventos(db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
     evs = db.query(Evento).order_by(Evento.fecha_creacion.desc()).all()
     res = []
+
     for e in evs:
         u = db.query(Usuario).filter(Usuario.id == e.creado_por_usuario_id).first()
-        res.append({"id": str(e.id), "codigo": e.codigo_curso, "nombre": e.nombre_curso, "estado": e.estado, "creador": u.nombre_completo if u else "Admin", "fecha": e.fecha_creacion})
+
+        # traer último comentario
+        historial = db.query(HistorialEvento)\
+            .filter(HistorialEvento.evento_id == e.id, HistorialEvento.accion == "RECHAZADO")\
+            .order_by(HistorialEvento.fecha_registro.desc())\
+            .first()
+
+        comentario = historial.comentario if historial else ""
+
+        res.append({
+            "id": str(e.id),
+            "codigo": e.codigo_curso,
+            "nombre": e.nombre_curso,
+            "estado": e.estado,
+            "creador": u.nombre_completo if u else "Admin",
+            "fecha": e.fecha_creacion,
+            "comentario": comentario   #IMPORTANTE
+        })
+
     return res
 
 @app.put("/admin/eventos/{id}/aprobar")
@@ -480,7 +499,19 @@ def aprobar_evento(id: str, db: Session = Depends(get_db), current_admin: Usuari
 @app.put("/admin/eventos/{id}/rechazar")
 def rechazar_evento(id: str, accion: AuditoriaAccion, db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
     ev = db.query(Evento).filter(Evento.id == id).first()
-    if ev: ev.estado = "RECHAZADO"; db.commit()
+
+    if ev:
+        ev.estado = "RECHAZADO"
+
+        db.add(HistorialEvento(
+            evento_id=ev.id,
+            usuario_id=current_admin.id,
+            accion="RECHAZADO",
+            comentario=accion.comentario
+        ))
+
+        db.commit()
+
     return {"status": "ok"}
 
 @app.put("/admin/eventos/{id}/revertir")
