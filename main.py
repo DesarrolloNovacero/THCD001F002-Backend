@@ -184,6 +184,26 @@ def eliminar_usuario(user_id: str, db: Session = Depends(get_db), current_admin:
     if u: db.delete(u); db.commit()
     return {"message": "ok"}
 
+@app.put("/usuarios/{user_id}/password")
+def cambiar_password(
+    user_id: str,
+    data: UpdatePasswordModel,
+    db: Session = Depends(get_db),
+    current_user: Usuario = Depends(get_current_user)
+):
+    user = db.query(Usuario).filter(Usuario.id == user_id).first()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    if current_user.rol != "ADMIN":
+        raise HTTPException(status_code=403, detail="Solo los administradores pueden cambiar contraseñas")
+
+    user.password_hash = pwd_context.hash(data.password)
+    db.commit()
+
+    return {"message": "Contraseña actualizada correctamente"}
+
 @app.get("/check-db-status")
 def check_db_status(db: Session = Depends(get_db)):
     return {"ready": db.query(Colaborador).count() > 0}
