@@ -307,6 +307,7 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
         db.commit(); return {"message": "ok", "evento_id": str(evento.id)}
     except Exception as e: db.rollback(); raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/upload-masters")
 def upload_masters(
     file: UploadFile = File(...),
@@ -314,69 +315,138 @@ def upload_masters(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_admin)
 ):
+    def normalizar(texto):
+        texto = str(texto).strip().lower()
+        texto = unicodedata.normalize("NFD", texto)
+        texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+        texto = " ".join(texto.split())
+        return texto
+
+    def obtener_valor(row, posibles):
+        for columna in posibles:
+            col = normalizar(columna)
+            if col in row.index:
+                valor = row[col]
+                if pd.isna(valor):
+                    return ""
+                return str(valor).strip()
+        return ""
+
     try:
         contents = file.file.read()
 
         df = pd.read_excel(io.BytesIO(contents))
 
-        df.columns = [str(c).strip() for c in df.columns]
+        # Normalizar todos los nombres de columnas
+        df.columns = [normalizar(c) for c in df.columns]
 
-        df = df.rename(columns={
-            "ECUADOR CÉDULA DE IDENTIFICACIÓN Identificación Nacional": "Identificación Nacional"
-        })
-
-        count = 0
+        procesados = 0
 
         for _, row in df.iterrows():
 
-            cedula = str(row.get("Identificación Nacional", "")).strip()
+            cedula = obtener_valor(row, [
+                "ecuador cedula de identificacion identificacion nacional",
+                "identificacion nacional",
+                "cedula"
+            ])
 
             if cedula.endswith(".0"):
-                cedula = cedula.split(".")[0]
+                cedula = cedula[:-2]
 
             if not cedula:
                 continue
 
-            fecha_desv = str(row.get("Fecha de desvinculación", "")).strip()
+
+            fecha_desv = obtener_valor(row, [
+                "detalles de empleo fecha de desvinculacion",
+                "fecha de desvinculacion"
+            ])
+
             estado = "CESANTE" if fecha_desv else "ACTIVO"
 
-            colab = db.query(Colaborador).filter(Colaborador.cedula == cedula).first()
 
-            data_map = {
+            datos = {
                 "cedula": cedula,
-                "apellidos": str(row.get("Apellidos", "")),
-                "nombres": str(row.get("Nombres", "")),
-                "cargo": str(row.get("Cargo Nombre del puesto", "")),
-                "genero": str(row.get("Sexo", "")),
-                "unidad": str(row.get("Unidad de negocio Nombre", "")),
-                "area": str(row.get("Área Nombre", "")),
-                "seccion": str(row.get("Sección Nombre", "")),
-                "centro_costo": str(row.get("Centro de costo Nombre", "")),
-                "grupo_personal": str(row.get("Grupo de Personal", "")),
-                "area_personal": str(row.get("Área de Personal", "")),
-                "jefe_inmediato": str(row.get("Jefe Inmediato", "")),
-                "gerente_area": str(row.get("GERENTE DE AREA  Relaciones Laborales Nombre", "")),
-                "localidad": str(row.get("Locación  Nombre", "")),
+                "apellidos": obtener_valor(row, [
+                    "apellidos"
+                ]),
+                "nombres": obtener_valor(row, [
+                    "nombres"
+                ]),
+                "cargo": obtener_valor(row, [
+                    "cargo nombre del puesto",
+                    "cargo"
+                ]),
+                "genero": obtener_valor(row, [
+                    "sexo",
+                    "genero"
+                ]),
+                "unidad": obtener_valor(row, [
+                    "unidad de negocio nombre"
+                ]),
+                "area": obtener_valor(row, [
+                    "area nombre"
+                ]),
+                "seccion": obtener_valor(row, [
+                    "seccion nombre"
+                ]),
+                "centro_costo": obtener_valor(row, [
+                    "centro de costo nombre"
+                ]),
+                "grupo_personal": obtener_valor(row, [
+                    "grupo de personal"
+                ]),
+                "area_personal": obtener_valor(row, [
+                    "area de personal"
+                ]),
+                "jefe_inmediato": obtener_valor(row, [
+                    "jefe inmediato"
+                ]),
+                "gerente_area": obtener_valor(row, [
+                    "gerente de area relaciones laborales nombre",
+                    "gerente de area"
+                ]),
+                "localidad": obtener_valor(row, [
+                    "locacion nombre",
+                    "localidad"
+                ]),
                 "estado_laboral": estado,
                 "origen": "upload"
             }
 
-            if not colab:
-                colab = Colaborador(**data_map)
-                db.add(colab)
-            else:
-                for key, value in data_map.items():
-                    setattr(colab, key, value)
 
-            count += 1
+            colaborador = db.query(Colaborador).filter(
+                Colaborador.cedula == cedula
+            ).first()
+
+
+            if colaborador:
+                for campo, valor in datos.items():
+                    setattr(colaborador, campo, valor)
+            else:
+                db.add(Colaborador(**datos))
+
+
+            procesados += 1
+
 
         db.commit()
 
-        return {"status": "ok", "procesados": count}
+        return {
+            "status": "ok",
+            "mes_corte": mes_corte,
+            "registros_procesados": procesados
+        }
+
 
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error cargando master: {str(e)}"
+        )
+
+
 
 @app.get("/mis-eventos")
 def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
