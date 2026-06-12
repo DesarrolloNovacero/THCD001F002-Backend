@@ -318,10 +318,10 @@ def upload_masters(
         contents = file.file.read()
         df = pd.read_excel(io.BytesIO(contents))
 
-        # ✅ LIMPIAR COLUMNAS
+        # LIMPIAR COLUMNAS
         df.columns = [str(c).strip() for c in df.columns]
 
-        # ✅ MAPEO FLEXIBLE (CLAVE)
+        # MAPEO FLEXIBLE (CLAVE)
         columnas_map = {
             "cedula": "ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional",
             "fecha_desv": "Detalles de Empleo Fecha de Desvinculación",
@@ -342,7 +342,7 @@ def upload_masters(
 
         for _, row in df.iterrows():
 
-            # ✅ CEDULA
+            # CEDULA
             cedula = str(row.get(columnas_map["cedula"], "")).strip()
 
             if cedula.endswith(".0"):
@@ -351,7 +351,7 @@ def upload_masters(
             if not cedula:
                 continue
 
-            # ✅ ESTADO LABORAL
+            # ESTADO LABORAL
             fecha_desv = str(row.get(columnas_map["fecha_desv"], "")).strip()
             estado = "CESANTE" if fecha_desv and fecha_desv != "nan" else "ACTIVO"
 
@@ -373,7 +373,7 @@ def upload_masters(
                 "gerente_area": str(row.get(columnas_map["gerente_area"], "")),
                 "localidad": str(row.get(columnas_map["localidad"], "")),
                 "estado_laboral": estado,
-                "origen": "upload"
+                "origen": "maestro"
             }
 
             if not colab:
