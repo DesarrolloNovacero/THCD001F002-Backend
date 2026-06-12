@@ -307,8 +307,6 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
         db.commit(); return {"message": "ok", "evento_id": str(evento.id)}
     except Exception as e: db.rollback(); raise HTTPException(status_code=500, detail=str(e))
 
-
-
 @app.post("/upload-masters")
 def upload_masters(
     file: UploadFile = File(...),
@@ -319,26 +317,35 @@ def upload_masters(
     try:
         contents = file.file.read()
 
-        df = pd.read_excel(io.BytesIO(contents))
+        # ✅ FIX 1: evitar tipos raros + headers sucios
+        df = pd.read_excel(io.BytesIO(contents), dtype=str)
+        df.columns = df.columns.str.strip()
 
         print("======== COLUMNAS LEIDAS DEL EXCEL ========")
         for i, col in enumerate(df.columns):
             print(f"{i}: '{col}'")
         print("===========================================")
 
+        total_filas = len(df)
         procesados = 0
         errores = 0
+        saltados = 0
+
+        cedula_col = "ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional"
+        fecha_col = "Detalles de Empleo Fecha de Desvinculación"
 
         for index, row in df.iterrows():
 
-            # CÉDULA
-            cedula = row.get(
-                "ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional",
-                ""
-            )
+            print(f"Procesando fila {index + 1}/{total_filas}")
 
-            if pd.isna(cedula):
-                print(f"Fila {index}: Sin cédula")
+            # =========================
+            # CÉDULA (ROBUSTA)
+            # =========================
+            cedula = row.get(cedula_col)
+
+            if pd.isna(cedula) or str(cedula).strip() == "":
+                print(f"SKIP fila {index}: cédula vacía")
+                saltados += 1
                 continue
 
             cedula = str(cedula).strip()
@@ -346,22 +353,24 @@ def upload_masters(
             if cedula.endswith(".0"):
                 cedula = cedula[:-2]
 
-            if cedula == "":
-                print(f"Fila {index}: Cédula vacía")
+            if cedula.lower() == "nan":
+                print(f"SKIP fila {index}: cédula inválida")
+                saltados += 1
                 continue
 
-
+            # =========================
             # ESTADO LABORAL
-            fecha_desv = row.get(
-                "Detalles de Empleo Fecha de Desvinculación"
-            )
+            # =========================
+            fecha_desv = row.get(fecha_col)
 
             if pd.isna(fecha_desv) or str(fecha_desv).strip() == "":
                 estado = "ACTIVO"
             else:
                 estado = "CESANTE"
 
-
+            # =========================
+            # DATA
+            # =========================
             datos = {
                 "cedula": cedula,
                 "apellidos": "" if pd.isna(row.get("Apellidos")) else str(row.get("Apellidos")).strip(),
@@ -381,34 +390,46 @@ def upload_masters(
                 "origen": "upload"
             }
 
+            # =========================
+            # UPSERT
+            # =========================
+            try:
+                colaborador = db.query(Colaborador).filter(
+                    Colaborador.cedula == cedula
+                ).first()
 
-            colaborador = db.query(Colaborador).filter(
-                Colaborador.cedula == cedula
-            ).first()
+                if colaborador:
+                    for campo, valor in datos.items():
+                        setattr(colaborador, campo, valor)
+                else:
+                    nuevo = Colaborador(**datos)
+                    db.add(nuevo)
 
+                procesados += 1
 
-            if colaborador:
-                for campo, valor in datos.items():
-                    setattr(colaborador, campo, valor)
-            else:
-                nuevo = Colaborador(**datos)
-                db.add(nuevo)
-
-
-            procesados += 1
-
+            except Exception as e:
+                print(f"ERROR fila {index} cedula {cedula}: {str(e)}")
+                errores += 1
+                continue
 
         db.commit()
 
+        print("======== RESUMEN ========")
+        print(f"Total filas Excel: {total_filas}")
+        print(f"Procesados: {procesados}")
+        print(f"Saltados: {saltados}")
+        print(f"Errores: {errores}")
+        print("=========================")
 
         return {
             "status": "ok",
             "mensaje": "Carga finalizada",
             "mes_corte": mes_corte,
+            "total_filas": total_filas,
             "procesados": procesados,
+            "saltados": saltados,
             "errores": errores
         }
-
 
     except Exception as e:
         db.rollback()
@@ -420,8 +441,7 @@ def upload_masters(
             status_code=500,
             detail=f"Error al cargar el master: {str(e)}"
         )
-
-
+    
 @app.get("/mis-eventos")
 def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     evs = db.query(Evento).filter(Evento.creado_por_usuario_id == current_user.id).order_by(Evento.fecha_creacion.desc()).all()
