@@ -318,36 +318,26 @@ def upload_masters(
         contents = file.file.read()
         df = pd.read_excel(io.BytesIO(contents))
 
-        # LIMPIAR COLUMNAS
-        df.columns = [str(c).strip() for c in df.columns]
+        # NORMALIZAR COLUMNAS (CLAVE)
+        df.columns = [str(c).strip().lower() for c in df.columns]
 
-        df.columns = [str(c).strip() for c in df.columns]
-        df.columns = [c.replace("  ", " ") for c in df.columns]  # ✅ elimina dobles espacios
-
-
-        # MAPEO FLEXIBLE (CLAVE)
-        columnas_map = {
-            "cedula": "ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional",
-            "fecha_desv": "Detalles de Empleo Fecha de Desvinculación",
-            "cargo": "Cargo Nombre del puesto",
-            "genero": "Sexo",
-            "unidad": "Unidad de negocio Nombre",
-            "area": "Área Nombre",
-            "seccion": "Sección Nombre",
-            "centro_costo": "Centro de costo Nombre",
-            "grupo_personal": "Grupo de Personal",
-            "area_personal": "Área de Personal",
-            "jefe_inmediato": "Jefe Inmediato",
-            "gerente_area": "GERENTE DE AREA  Relaciones Laborales Nombre",
-            "localidad": "Locación  Nombre",
-        }
+        # FUNCIÓN PARA BUSCAR COLUMNAS FLEXIBLEMENTE
+        def get_col(row, possible_names):
+            for name in possible_names:
+                name = name.lower()
+                if name in df.columns:
+                    return str(row.get(name, "")).strip()
+            return ""
 
         count = 0
 
         for _, row in df.iterrows():
 
-            # CEDULA
-            cedula = str(row.get(columnas_map["cedula"], "")).strip()
+            # CEDULA (BUSCA POR CONTENIDO)
+            cedula = get_col(row, [
+                "ecuador cédula de identificación  identificación nacional",
+                "identificación nacional"
+            ])
 
             if cedula.endswith(".0"):
                 cedula = cedula.split(".")[0]
@@ -355,29 +345,33 @@ def upload_masters(
             if not cedula:
                 continue
 
-            # ESTADO LABORAL
-            fecha_desv = str(row.get(columnas_map["fecha_desv"], "")).strip()
+            # FECHA DESVINCULACIÓN
+            fecha_desv = get_col(row, [
+                "detalles de empleo fecha de desvinculación",
+                "fecha de desvinculación"
+            ])
+
             estado = "CESANTE" if fecha_desv and fecha_desv != "nan" else "ACTIVO"
 
             colab = db.query(Colaborador).filter(Colaborador.cedula == cedula).first()
 
             data_map = {
                 "cedula": cedula,
-                "apellidos": str(row.get("Apellidos", "")),
-                "nombres": str(row.get("Nombres", "")),
-                "cargo": str(row.get(columnas_map["cargo"], "")),
-                "genero": str(row.get(columnas_map["genero"], "")),
-                "unidad": str(row.get(columnas_map["unidad"], "")),
-                "area": str(row.get(columnas_map["area"], "")),
-                "seccion": str(row.get(columnas_map["seccion"], "")),
-                "centro_costo": str(row.get(columnas_map["centro_costo"], "")),
-                "grupo_personal": str(row.get(columnas_map["grupo_personal"], "")),
-                "area_personal": str(row.get(columnas_map["area_personal"], "")),
-                "jefe_inmediato": str(row.get(columnas_map["jefe_inmediato"], "")),
-                "gerente_area": str(row.get(columnas_map["gerente_area"], "")),
-                "localidad": str(row.get(columnas_map["localidad"], "")),
+                "apellidos": get_col(row, ["apellidos"]),
+                "nombres": get_col(row, ["nombres"]),
+                "cargo": get_col(row, ["cargo nombre del puesto", "cargo"]),
+                "genero": get_col(row, ["sexo"]),
+                "unidad": get_col(row, ["unidad de negocio nombre"]),
+                "area": get_col(row, ["área nombre", "area nombre"]),
+                "seccion": get_col(row, ["sección nombre", "seccion nombre"]),
+                "centro_costo": get_col(row, ["centro de costo nombre"]),
+                "grupo_personal": get_col(row, ["grupo de personal"]),
+                "area_personal": get_col(row, ["área de personal"]),
+                "jefe_inmediato": get_col(row, ["jefe inmediato"]),
+                "gerente_area": get_col(row, ["gerente de area  relaciones laborales nombre"]),
+                "localidad": get_col(row, ["locación  nombre", "locacion nombre"]),
                 "estado_laboral": estado,
-                "origen": "maestro"
+                "origen": "upload"
             }
 
             if not colab:
@@ -396,6 +390,7 @@ def upload_masters(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/mis-eventos")
 def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
