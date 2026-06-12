@@ -324,7 +324,7 @@ def upload_masters(
         # =========================
         # LEER EXCEL
         # =========================
-        df = pd.read_excel(io.BytesIO(contents))
+        df = pd.read_excel(io.BytesIO(contents), dtype=str)
 
         # limpiar filas completamente vacías
         df = df.dropna(how="all")
@@ -363,10 +363,19 @@ def upload_masters(
                 saltados += 1
                 continue
 
-            if cedula.endswith(".0"):
-                cedula = cedula[:-2]
+            cedula = row.get("ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional")
 
-            # eliminar espacios invisibles
+            if pd.isna(cedula):
+                saltados += 1
+                continue
+
+            cedula = str(cedula).strip()
+
+            if cedula.lower() in ["", "nan", "none", "null"]:
+                saltados += 1
+                continue
+
+            # limpiar espacios invisibles
             cedula = cedula.replace(" ", "")
 
             if cedula == "":
