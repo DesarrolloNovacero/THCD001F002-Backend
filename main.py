@@ -331,20 +331,20 @@ def upload_masters(
         print("COLUMNAS ORIGINALES:")
         print(df.columns.tolist())
 
-        # Normalizar nombres de columnas
-        df.columns = [
-            str(col).strip().lower()
-            for col in df.columns
-        ]
+        # Normalizar 
+        def normalize(text):
+            return unicodedata.normalize('NFKD', str(text)).encode('ascii', 'ignore').decode('ascii').strip().lower()
+        
+        #Normalizar nombres de columnas
+        df.columns = [normalize(col) for col in df.columns]
 
         print("COLUMNAS NORMALIZADAS:")
-        print(df.columns.tolist())
-
-
+        print(df.columns.tolist())        
+        
         # Función para obtener columnas flexibles
         def get_col(row, possible_names):
             for name in possible_names:
-                name = name.lower()
+                name = normalize(name)
 
                 if name in df.columns:
                     value = row.get(name, "")
