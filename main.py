@@ -316,20 +316,34 @@ def upload_masters(
 ):
     try:
         contents = file.file.read()
-
         df = pd.read_excel(io.BytesIO(contents))
 
+        # ✅ LIMPIAR COLUMNAS
         df.columns = [str(c).strip() for c in df.columns]
 
-        df = df.rename(columns={
-            "ECUADOR CÉDULA DE IDENTIFICACIÓN Identificación Nacional": "Identificación Nacional"
-        })
+        # ✅ MAPEO FLEXIBLE (CLAVE)
+        columnas_map = {
+            "cedula": "ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional",
+            "fecha_desv": "Detalles de Empleo Fecha de Desvinculación",
+            "cargo": "Cargo Nombre del puesto",
+            "genero": "Sexo",
+            "unidad": "Unidad de negocio Nombre",
+            "area": "Área Nombre",
+            "seccion": "Sección Nombre",
+            "centro_costo": "Centro de costo Nombre",
+            "grupo_personal": "Grupo de Personal",
+            "area_personal": "Área de Personal",
+            "jefe_inmediato": "Jefe Inmediato",
+            "gerente_area": "GERENTE DE AREA  Relaciones Laborales Nombre",
+            "localidad": "Locación  Nombre",
+        }
 
         count = 0
 
         for _, row in df.iterrows():
 
-            cedula = str(row.get("Identificación Nacional", "")).strip()
+            # ✅ CEDULA
+            cedula = str(row.get(columnas_map["cedula"], "")).strip()
 
             if cedula.endswith(".0"):
                 cedula = cedula.split(".")[0]
@@ -337,8 +351,9 @@ def upload_masters(
             if not cedula:
                 continue
 
-            fecha_desv = str(row.get("Fecha de desvinculación", "")).strip()
-            estado = "CESANTE" if fecha_desv else "ACTIVO"
+            # ✅ ESTADO LABORAL
+            fecha_desv = str(row.get(columnas_map["fecha_desv"], "")).strip()
+            estado = "CESANTE" if fecha_desv and fecha_desv != "nan" else "ACTIVO"
 
             colab = db.query(Colaborador).filter(Colaborador.cedula == cedula).first()
 
@@ -346,17 +361,17 @@ def upload_masters(
                 "cedula": cedula,
                 "apellidos": str(row.get("Apellidos", "")),
                 "nombres": str(row.get("Nombres", "")),
-                "cargo": str(row.get("Cargo Nombre del puesto", "")),
-                "genero": str(row.get("Sexo", "")),
-                "unidad": str(row.get("Unidad de negocio Nombre", "")),
-                "area": str(row.get("Área Nombre", "")),
-                "seccion": str(row.get("Sección Nombre", "")),
-                "centro_costo": str(row.get("Centro de costo Nombre", "")),
-                "grupo_personal": str(row.get("Grupo de Personal", "")),
-                "area_personal": str(row.get("Área de Personal", "")),
-                "jefe_inmediato": str(row.get("Jefe Inmediato", "")),
-                "gerente_area": str(row.get("GERENTE DE AREA  Relaciones Laborales Nombre", "")),
-                "localidad": str(row.get("Locación  Nombre", "")),
+                "cargo": str(row.get(columnas_map["cargo"], "")),
+                "genero": str(row.get(columnas_map["genero"], "")),
+                "unidad": str(row.get(columnas_map["unidad"], "")),
+                "area": str(row.get(columnas_map["area"], "")),
+                "seccion": str(row.get(columnas_map["seccion"], "")),
+                "centro_costo": str(row.get(columnas_map["centro_costo"], "")),
+                "grupo_personal": str(row.get(columnas_map["grupo_personal"], "")),
+                "area_personal": str(row.get(columnas_map["area_personal"], "")),
+                "jefe_inmediato": str(row.get(columnas_map["jefe_inmediato"], "")),
+                "gerente_area": str(row.get(columnas_map["gerente_area"], "")),
+                "localidad": str(row.get(columnas_map["localidad"], "")),
                 "estado_laboral": estado,
                 "origen": "upload"
             }
