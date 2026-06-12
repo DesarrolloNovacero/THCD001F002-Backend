@@ -338,14 +338,8 @@ def upload_masters(
         errores = 0
         saltados = 0
 
-        # =========================
-        # LOOP PRINCIPAL
-        # =========================
         for index, row in df.iterrows():
 
-            # =========================
-            # CÉDULA (ROBUSTA)
-            # =========================
             cedula = row.get(
                 "ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional"
             )
@@ -415,9 +409,6 @@ def upload_masters(
                 "origen": "upload"
             }
 
-            # =========================
-            # UPSERT DB
-            # =========================
             try:
                 colaborador = db.query(Colaborador).filter(
                     Colaborador.cedula == cedula
@@ -435,9 +426,6 @@ def upload_masters(
                 print(f"ERROR fila {index} cedula {cedula}: {str(e)}")
                 errores += 1
 
-        # =========================
-        # COMMIT FINAL
-        # =========================
         db.commit()
 
         print("======== RESUMEN ========")
