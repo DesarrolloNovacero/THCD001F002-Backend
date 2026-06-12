@@ -308,6 +308,7 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
     except Exception as e: db.rollback(); raise HTTPException(status_code=500, detail=str(e))
 
 
+
 @app.post("/upload-masters")
 def upload_masters(
     file: UploadFile = File(...),
@@ -315,101 +316,67 @@ def upload_masters(
     db: Session = Depends(get_db),
     current_user: Usuario = Depends(get_current_admin)
 ):
-    def normalizar(texto):
-        texto = str(texto).strip().lower()
-        texto = unicodedata.normalize("NFD", texto)
-        texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
-        texto = " ".join(texto.split())
-        return texto
-
-    def obtener_valor(row, posibles):
-        for columna in posibles:
-            col = normalizar(columna)
-            if col in row.index:
-                valor = row[col]
-                if pd.isna(valor):
-                    return ""
-                return str(valor).strip()
-        return ""
-
     try:
         contents = file.file.read()
 
         df = pd.read_excel(io.BytesIO(contents))
 
-        # Normalizar todos los nombres de columnas
-        df.columns = [normalizar(c) for c in df.columns]
+        print("======== COLUMNAS LEIDAS DEL EXCEL ========")
+        for i, col in enumerate(df.columns):
+            print(f"{i}: '{col}'")
+        print("===========================================")
 
         procesados = 0
+        errores = 0
 
-        for _, row in df.iterrows():
+        for index, row in df.iterrows():
 
-            cedula = obtener_valor(row, [
-                "ecuador cedula de identificacion identificacion nacional",
-                "identificacion nacional",
-                "cedula"
-            ])
+            # CÉDULA
+            cedula = row.get(
+                "ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional",
+                ""
+            )
+
+            if pd.isna(cedula):
+                print(f"Fila {index}: Sin cédula")
+                continue
+
+            cedula = str(cedula).strip()
 
             if cedula.endswith(".0"):
                 cedula = cedula[:-2]
 
-            if not cedula:
+            if cedula == "":
+                print(f"Fila {index}: Cédula vacía")
                 continue
 
 
-            fecha_desv = obtener_valor(row, [
-                "detalles de empleo fecha de desvinculacion",
-                "fecha de desvinculacion"
-            ])
+            # ESTADO LABORAL
+            fecha_desv = row.get(
+                "Detalles de Empleo Fecha de Desvinculación"
+            )
 
-            estado = "CESANTE" if fecha_desv else "ACTIVO"
+            if pd.isna(fecha_desv) or str(fecha_desv).strip() == "":
+                estado = "ACTIVO"
+            else:
+                estado = "CESANTE"
 
 
             datos = {
                 "cedula": cedula,
-                "apellidos": obtener_valor(row, [
-                    "apellidos"
-                ]),
-                "nombres": obtener_valor(row, [
-                    "nombres"
-                ]),
-                "cargo": obtener_valor(row, [
-                    "cargo nombre del puesto",
-                    "cargo"
-                ]),
-                "genero": obtener_valor(row, [
-                    "sexo",
-                    "genero"
-                ]),
-                "unidad": obtener_valor(row, [
-                    "unidad de negocio nombre"
-                ]),
-                "area": obtener_valor(row, [
-                    "area nombre"
-                ]),
-                "seccion": obtener_valor(row, [
-                    "seccion nombre"
-                ]),
-                "centro_costo": obtener_valor(row, [
-                    "centro de costo nombre"
-                ]),
-                "grupo_personal": obtener_valor(row, [
-                    "grupo de personal"
-                ]),
-                "area_personal": obtener_valor(row, [
-                    "area de personal"
-                ]),
-                "jefe_inmediato": obtener_valor(row, [
-                    "jefe inmediato"
-                ]),
-                "gerente_area": obtener_valor(row, [
-                    "gerente de area relaciones laborales nombre",
-                    "gerente de area"
-                ]),
-                "localidad": obtener_valor(row, [
-                    "locacion nombre",
-                    "localidad"
-                ]),
+                "apellidos": "" if pd.isna(row.get("Apellidos")) else str(row.get("Apellidos")).strip(),
+                "nombres": "" if pd.isna(row.get("Nombres")) else str(row.get("Nombres")).strip(),
+                "cargo": "" if pd.isna(row.get("Cargo Nombre del puesto")) else str(row.get("Cargo Nombre del puesto")).strip(),
+                "genero": "" if pd.isna(row.get("Sexo")) else str(row.get("Sexo")).strip(),
+                "unidad": "" if pd.isna(row.get("Unidad de negocio Nombre")) else str(row.get("Unidad de negocio Nombre")).strip(),
+                "area": "" if pd.isna(row.get("Área Nombre")) else str(row.get("Área Nombre")).strip(),
+                "seccion": "" if pd.isna(row.get("Sección Nombre")) else str(row.get("Sección Nombre")).strip(),
+                "centro_costo": "" if pd.isna(row.get("Centro de costo Nombre")) else str(row.get("Centro de costo Nombre")).strip(),
+                "grupo_personal": "" if pd.isna(row.get("Grupo de Personal")) else str(row.get("Grupo de Personal")).strip(),
+                "area_personal": "" if pd.isna(row.get("Área de Personal")) else str(row.get("Área de Personal")).strip(),
+                "jefe_inmediato": "" if pd.isna(row.get("Jefe Inmediato")) else str(row.get("Jefe Inmediato")).strip(),
+                "gerente_area": "" if pd.isna(row.get("GERENTE DE AREA  Relaciones Laborales Nombre")) else str(row.get("GERENTE DE AREA  Relaciones Laborales Nombre")).strip(),
+                "localidad": "" if pd.isna(row.get("Locación  Nombre")) else str(row.get("Locación  Nombre")).strip(),
                 "estado_laboral": estado,
                 "origen": "upload"
             }
@@ -424,7 +391,8 @@ def upload_masters(
                 for campo, valor in datos.items():
                     setattr(colaborador, campo, valor)
             else:
-                db.add(Colaborador(**datos))
+                nuevo = Colaborador(**datos)
+                db.add(nuevo)
 
 
             procesados += 1
@@ -432,20 +400,26 @@ def upload_masters(
 
         db.commit()
 
+
         return {
             "status": "ok",
+            "mensaje": "Carga finalizada",
             "mes_corte": mes_corte,
-            "registros_procesados": procesados
+            "procesados": procesados,
+            "errores": errores
         }
 
 
     except Exception as e:
         db.rollback()
+
+        print("ERROR EN UPLOAD MASTERS:")
+        print(str(e))
+
         raise HTTPException(
             status_code=500,
-            detail=f"Error cargando master: {str(e)}"
+            detail=f"Error al cargar el master: {str(e)}"
         )
-
 
 
 @app.get("/mis-eventos")
