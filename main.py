@@ -321,6 +321,10 @@ def upload_masters(
         # LIMPIAR COLUMNAS
         df.columns = [str(c).strip() for c in df.columns]
 
+        df.columns = [str(c).strip() for c in df.columns]
+        df.columns = [c.replace("  ", " ") for c in df.columns]  # ✅ elimina dobles espacios
+
+
         # MAPEO FLEXIBLE (CLAVE)
         columnas_map = {
             "cedula": "ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional",
