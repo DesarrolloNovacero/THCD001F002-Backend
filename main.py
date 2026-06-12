@@ -376,7 +376,8 @@ def upload_masters(
                 ]
             )
 
-            cedula = cedula.replace(".0", "")
+            if cedula.endswith(".0"):
+                cedula = cedula[:-2]
 
             if not cedula:
                 print(
