@@ -341,7 +341,7 @@ def upload_masters(
         for index, row in df.iterrows():
 
             cedula = row.get(
-                "ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional"
+                "ECUADOR CÉDULA DE IDENTIFICACIÓN Identificación Nacional"
             )
 
             if pd.isna(cedula):
@@ -357,7 +357,7 @@ def upload_masters(
                 saltados += 1
                 continue
 
-            cedula = row.get("ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional")
+            cedula = row.get("ECUADOR CÉDULA DE IDENTIFICACIÓN Identificación Nacional")
 
             if pd.isna(cedula):
                 saltados += 1
