@@ -341,7 +341,7 @@ def upload_masters(
         for index, row in df.iterrows():
 
             cedula = row.get(
-                "ECUADOR CÉDULA DE IDENTIFICACIÓN Identificación Nacional"
+                "ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional"
             )
 
             if pd.isna(cedula):
@@ -357,7 +357,7 @@ def upload_masters(
                 saltados += 1
                 continue
 
-            cedula = row.get("ECUADOR CÉDULA DE IDENTIFICACIÓN Identificación Nacional")
+            cedula = row.get("ECUADOR CÉDULA DE IDENTIFICACIÓN  Identificación Nacional")
 
             if pd.isna(cedula):
                 saltados += 1
@@ -369,7 +369,6 @@ def upload_masters(
                 saltados += 1
                 continue
 
-            # limpiar espacios invisibles
             cedula = cedula.replace(" ", "")
 
             if cedula == "":
@@ -377,9 +376,6 @@ def upload_masters(
                 saltados += 1
                 continue
 
-            # =========================
-            # ESTADO LABORAL
-            # =========================
             fecha_desv = row.get("Detalles de Empleo Fecha de Desvinculación")
 
             if pd.isna(fecha_desv) or str(fecha_desv).strip() == "":
@@ -387,9 +383,6 @@ def upload_masters(
             else:
                 estado = "CESANTE"
 
-            # =========================
-            # DATA
-            # =========================
             datos = {
                 "cedula": cedula,
                 "apellidos": "" if pd.isna(row.get("Apellidos")) else str(row.get("Apellidos")).strip(),
