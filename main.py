@@ -467,7 +467,7 @@ def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session =
             "comentario": comentario
         })
     return res
-
+    
 @app.get("/dashboard/metricas")
 def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
     try:
