@@ -446,11 +446,27 @@ def upload_masters(
             detail=f"Error al cargar el master: {str(e)}"
         )
 
-
 @app.get("/mis-eventos")
 def mis_eventos(current_user: Usuario = Depends(get_current_user), db: Session = Depends(get_db)):
     evs = db.query(Evento).filter(Evento.creado_por_usuario_id == current_user.id).order_by(Evento.fecha_creacion.desc()).all()
-    return [{"id": str(e.id), "codigo": e.codigo_curso, "nombre": e.nombre_curso, "estado": e.estado, "fecha": e.fecha_creacion} for e in evs]
+    res = []
+    for e in evs:
+        comentario = ""
+        if e.estado == "RECHAZADO":
+            historial = db.query(HistorialEvento)\
+                .filter(HistorialEvento.evento_id == e.id, HistorialEvento.accion == "RECHAZADO")\
+                .order_by(HistorialEvento.fecha_registro.desc())\
+                .first()
+            comentario = historial.comentario if historial else ""
+        res.append({
+            "id": str(e.id),
+            "codigo": e.codigo_curso,
+            "nombre": e.nombre_curso,
+            "estado": e.estado,
+            "fecha": e.fecha_creacion,
+            "comentario": comentario
+        })
+    return res
 
 @app.get("/dashboard/metricas")
 def obtener_metricas(mes: str, vista: str = "MENSUAL", estado: str = "TODOS", db: Session = Depends(get_db), current_admin: Usuario = Depends(get_current_admin)):
