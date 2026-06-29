@@ -304,7 +304,7 @@ def enviar_revision(payload: dict = Body(...), current_user: Usuario = Depends(g
                 db.add(colab); db.flush()
             db.add(Asistencia(evento_id=evento.id, colaborador_cedula=colab.cedula, estado_validacion="VALIDADO"))
         db.add(HistorialEvento(evento_id=evento.id, usuario_id=current_user.id, accion="ENVIADO A REVISION", comentario="Actualización"))
-        db.commit(); return {"message": "ok", "evento_id": str(evento.id),"codigo": (evento.codigo_curso)}
+        db.commit(); return {"message": "ok", "evento_id": str(evento.id),"codigo": evento.codigo_curso}
     except Exception as e: db.rollback(); raise HTTPException(status_code=500, detail=str(e))
 
 
